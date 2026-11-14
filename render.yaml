@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: nexus-home-assistant
+    runtime: static
+    buildCommand: "true"
+    staticPublishPath: ./public

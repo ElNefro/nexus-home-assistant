@@ -1,0 +1,881 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#0b0c10">
+<title>Контур · Умный дом</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Golos+Text:wght@400..800&family=Unbounded:wght@500;600;700&display=swap');
+:root{color-scheme:dark;--bg:#0b0c10;--surface:#15171e;--edge:#2b2e39;--ink:#f3f4fa;--muted:#a0a5b9;--active:#b6a3ff;--amber:#ffb36f;--blue:#65c9ff;--green:#75f4b2}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:400 15px 'Golos Text',system-ui,sans-serif}button,input,select,textarea{font:inherit}button,select{cursor:pointer}button:disabled,input:disabled{cursor:default;opacity:.45}button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid var(--active);outline-offset:3px}[hidden]{display:none!important}
+.wrap{width:min(100% - 48px,1040px);margin-inline:auto}.top{border-bottom:1px solid #22242e;background:#101117}.top .wrap{height:76px;display:flex;align-items:center;justify-content:space-between;gap:16px}.room-picker{display:flex;align-items:center;gap:11px;min-width:0}.mark,.square{display:grid;place-items:center;flex:none;width:40px;height:40px;border-radius:13px;background:#28213e;color:var(--active);font-size:22px}.room-picker select{min-width:0;max-width:min(48vw,280px);background:#1b1c25;border:1px solid var(--edge);border-radius:11px;color:var(--ink);padding:9px 12px;font-weight:700}.brand{font:600 15px Unbounded,system-ui;letter-spacing:.04em}.brand small{display:block;text-align:right;color:var(--muted);font:400 11px 'Golos Text',sans-serif;margin-top:3px;letter-spacing:0}
+main{padding-top:42px;padding-bottom:116px;min-height:calc(100dvh - 76px)}.heading{margin-bottom:24px}.kicker{color:var(--active);font-size:11px;font-weight:800;letter-spacing:.13em;text-transform:uppercase;margin:0 0 10px}h1,h2,h3,p{margin-top:0}h1{font:600 clamp(26px,5vw,44px)/1.18 Unbounded,system-ui;letter-spacing:-.045em;margin-bottom:10px;overflow-wrap:anywhere}h2{font-size:19px;margin-bottom:14px}h3{font-size:16px;margin-bottom:5px}.sub,.muted{color:var(--muted)}.sub{margin:0;line-height:1.5}.gauges{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.metric,.panel{background:var(--surface);border:1px solid var(--edge);border-radius:19px}.metric{min-width:0;text-align:center;padding:22px 12px;background:radial-gradient(ellipse at 50% 48%,color-mix(in srgb,var(--tone) 8%,transparent),transparent 65%),var(--surface)}.metric h2{font-size:15px;margin:0 0 15px}.dial{width:min(100%,142px);aspect-ratio:1;margin:auto;border-radius:50%;padding:7px;background:conic-gradient(from 0deg,var(--tone) var(--fill),#2b2d37 0);box-shadow:0 0 24px color-mix(in srgb,var(--tone) 12%,transparent)}.dial-center{width:100%;height:100%;border-radius:50%;background:#12141a;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:2px}.dial strong{font-size:clamp(17px,4vw,31px);line-height:1;color:var(--tone);letter-spacing:-.04em}.dial small{font-size:11px;color:var(--muted)}.metric .sub{font-size:12px;margin-top:14px}.section-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin:30px 0 12px}.section-head h2{margin:0}.stack{display:grid;gap:10px}.panel{padding:20px}.tile{display:flex;align-items:center;gap:13px;width:100%;text-align:left;color:var(--ink);padding:14px;background:var(--surface);border:1px solid var(--edge);border-radius:15px}.tile:hover,.ghost:hover{border-color:var(--active)}.tile .square{background:color-mix(in srgb,var(--tone,var(--active)) 13%,#15171e);color:var(--tone,var(--active))}.tile .title{display:block;font-weight:700;overflow-wrap:anywhere}.tile small{display:block;color:var(--muted);margin-top:3px}.arrow{margin-left:auto;color:var(--muted);font-size:22px}.primary,.ghost{padding:9px 13px;border-radius:10px;font-weight:700}.primary{background:var(--active);border:1px solid transparent;color:#181125}.ghost{background:#1d1f29;border:1px solid var(--edge);color:var(--ink)}.toolbar,.actions{display:flex;flex-wrap:wrap;gap:9px}.actions{justify-content:flex-end;margin-top:17px}.empty{color:var(--muted);padding:22px;border:1px dashed var(--edge);border-radius:15px;margin:0}.bottom{position:fixed;bottom:0;left:0;right:0;border-top:1px solid var(--edge);background:#111218f5;padding-bottom:env(safe-area-inset-bottom);z-index:2;backdrop-filter:blur(12px)}.bottom .wrap{display:grid;grid-template-columns:repeat(4,1fr);gap:5px;padding-block:8px}.nav{display:grid;justify-items:center;gap:3px;border:0;border-radius:12px;background:none;color:var(--muted);padding:6px 3px;font-size:12px}.nav span{font-size:23px;line-height:1.15}.nav[aria-current=page]{color:var(--active);background:#251e37}.tag{border-radius:999px;padding:5px 9px;background:#29213f;color:#d2c4ff;font-size:12px;white-space:nowrap}.profile{display:flex;align-items:center;gap:14px;margin-bottom:15px}.profile h2{margin:0 0 3px;overflow-wrap:anywhere}.profile .square{width:58px;height:58px;font-weight:800;font-size:21px}.profile .tag{margin-left:auto}.profile p{margin:0}.control{padding:13px 0;border-bottom:1px solid var(--edge)}.control:last-child{border-bottom:0}.line{display:flex;justify-content:space-between;align-items:center;gap:10px}.reading{color:var(--tone,var(--active));font-weight:700;white-space:nowrap}.switch{width:44px;height:25px;border:0;border-radius:20px;background:#464957;display:flex;align-items:center;padding:3px;flex:none}.switch::before{content:'';width:19px;height:19px;border-radius:50%;background:#eef0fb}.switch[aria-checked=true]{background:var(--tone,var(--active));justify-content:flex-end}.switch[aria-checked=true]::before{background:#16141e}input[type=range]{width:100%;accent-color:var(--tone,var(--active));margin:10px 0 0}.status{color:var(--muted);font-size:13px;margin:14px 0 0}.status:empty{display:none}
+dialog{width:min(100% - 28px,530px);max-height:calc(100dvh - 28px);overflow:auto;background:var(--surface);color:var(--ink);border:1px solid var(--edge);border-radius:20px;padding:21px}dialog::backdrop{background:#06070abc}dialog h2{overflow-wrap:anywhere}form label{display:block;margin:12px 0 6px}input[type=text],select,textarea{max-width:100%;color:var(--ink);background:#101117;border:1px solid #3b3e4c;border-radius:9px;padding:9px}form input[type=text],form select,form textarea{width:100%}textarea{min-height:140px;resize:vertical;font-family:monospace}.error{color:#ffaea6;margin:10px 0 0}.room-details{display:grid;gap:14px}.room-details .panel h2{margin-bottom:10px}.device-links{display:grid;gap:8px;margin-top:12px}.row-buttons{display:flex;gap:8px;flex-wrap:wrap}.field-note{font-size:12px;color:var(--muted);margin:8px 0 0}
+@media(max-width:620px){.wrap{width:calc(100% - 28px)}.top .wrap{height:64px}.brand{font-size:12px}main{padding-top:28px}.gauges{gap:6px}.metric{border-radius:13px;padding:11px 5px}.metric h2{font-size:11px;min-height:30px;display:grid;place-items:center;margin:0 0 6px}.dial{padding:4px}.dial small{font-size:9px}.metric .sub{font-size:10px;margin-top:8px}.nav{font-size:10px}.panel{padding:14px}}
+:root{--bg:#191919;--surface:#2d2d2d;--edge:#414141;--muted:#bababa;--active:#ffaacb;--amber:#ffaacb;--blue:#18b5f5;--green:#33dc71}
+body{font-family:'Golos Text',system-ui,sans-serif}
+.top{background:transparent;border:0;padding-top:18px}
+.top .wrap{height:auto;display:block}
+.room-picker{position:relative;max-width:620px;margin:auto}
+.room-picker::before{content:'';position:absolute;left:18px;top:50%;transform:translateY(-35%);width:0;height:0;border-left:7px solid transparent;border-right:7px solid transparent;border-top:10px solid var(--ink);pointer-events:none}
+.room-picker select{appearance:none;width:100%;max-width:none;padding:15px 18px 15px 44px;border:1px solid var(--edge);border-radius:17px;background:var(--surface);font-size:17px;font-weight:600}
+main{padding-top:25px}
+.home-panel{max-width:620px;margin-inline:auto}
+.home-panel .gauges{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 16px;justify-items:center;padding:clamp(14px,4vw,36px);background:var(--surface);border:1px solid #373737;border-radius:clamp(28px,9vw,52px)}
+.home-panel .metric{width:100%;background:none;border:0;padding:0 0 6px;display:flex;flex-direction:column;align-items:center;gap:8px}
+.home-panel .metric:last-child{grid-column:1/-1;width:min(100%,280px);margin-top:5px}
+.home-panel .metric h2{order:1;margin:0;min-height:0;font-size:clamp(11px,3vw,15px);color:#e3e3e3;font-weight:500}
+.home-panel .dial{position:relative;width:min(100%,168px);padding:0;box-shadow:none;background:none;isolation:isolate;--track:#555;--arc-start:222deg;--arc-width:clamp(6px,1.7vw,11px)}
+.home-panel .metric:last-child .dial{width:min(76vw,218px);--arc-width:clamp(9px,2vw,15px)}
+.home-panel .dial::before,.home-panel .dial::after{content:'';position:absolute;inset:0;border-radius:50%;pointer-events:none}
+.home-panel .dial::before{border:2px solid var(--track);box-shadow:inset 0 0 0 4px var(--surface),inset 0 0 0 6px var(--track)}
+.home-panel .dial::after{background:conic-gradient(from var(--arc-start),var(--tone) var(--fill),transparent 0);mask:radial-gradient(farthest-side,transparent calc(100% - var(--arc-width)),#000 calc(100% - var(--arc-width) + 1px))}
+.home-panel .dial-center{position:relative;background:transparent}
+.home-panel .dial strong{color:var(--ink);font-weight:500;font-size:clamp(17px,5vw,31px)}
+.home-panel .metric:last-child strong{font-size:clamp(22px,6vw,38px)}
+.home-panel .metric .sub{display:none}.home-panel .metric .missing{display:block;order:2;margin:0}
+.bottom{background:transparent;border:0;backdrop-filter:none;padding-bottom:max(12px,env(safe-area-inset-bottom))}
+.bottom .wrap{max-width:620px;background:#2d2d2d;border:1px solid var(--edge);border-radius:18px;padding:5px;box-shadow:0 4px 22px #1118}
+.nav{color:#c3c3c3}
+.nav[aria-current=page]{background:#41333a;color:#ffd6e6}
+@media(max-width:620px){.top .wrap{height:auto}main{padding-top:14px}.home-panel .gauges{column-gap:9px}.home-panel .dial{width:min(100%,134px)}.home-panel .metric:last-child .dial{width:min(52vw,192px)}}
+
+.detail-panel{margin:16px 0}
+.detail-panel .gauges{padding:12px;grid-template-columns:repeat(auto-fit,minmax(100px,1fr))}
+.detail-panel .metric:last-child{grid-column:auto;width:100%;margin:0}
+.detail-panel .dial,.detail-panel .metric:last-child .dial{width:min(100%,125px);--arc-width:7px}
+.detail-panel .dial strong,.detail-panel .metric:last-child strong{font-size:clamp(16px,5vw,25px)}
+.detail-panel .metric h2{overflow-wrap:anywhere}
+
+.detail-page,.warnings{max-width:620px;margin:0 auto}
+.detail-page{display:grid;gap:14px}
+.detail-page .heading,.detail-page .detail-panel{margin:0}
+.detail-page .back{justify-self:start}
+.warnings{margin-top:22px}
+.schedule-row{display:flex;align-items:center;flex-wrap:wrap;gap:9px;margin:10px 0}
+.schedule-row input{padding:6px}
+
+.humidifier-picture{position:relative}
+.humidifier-picture::before{content:'';position:absolute;width:17px;height:19px;bottom:7px;border:2px solid currentColor;border-radius:7px 7px 5px 5px;background:linear-gradient(0deg,#65c9ff44 35%,transparent 35%)}
+.humidifier-picture::after{content:'';position:absolute;width:8px;height:4px;top:7px;border-top:2px solid currentColor;border-radius:50%}
+
+.home-panel .dial::after{filter:blur(2px);opacity:.94}
+.home-panel .dial::before{filter:blur(.9px)}
+.schedule-modes{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}
+.schedule-row input[type=number]{width:5rem;background:#191919;color:var(--ink);border:1px solid var(--edge);border-radius:8px}
+</style>
+</head>
+<body>
+<header class="top"><div class="wrap">
+  <div class="room-picker"><select id="room-picker" aria-label="Текущая комната"></select></div>
+
+</div></header>
+<main class="wrap">
+  <section id="screen" aria-label="Рабочая область"></section>
+  <p id="status" class="status" role="status"></p>
+</main>
+<nav class="bottom" aria-label="Основная навигация"><div class="wrap" id="nav">
+  <button class="nav" data-page="home"><span aria-hidden="true">⌂</span>Главная</button>
+  <button class="nav" data-page="devices"><span aria-hidden="true">◉</span>Приборы</button>
+  <button class="nav" data-page="rooms"><span aria-hidden="true">▦</span>Комнаты</button>
+  <button class="nav" data-page="profile"><span aria-hidden="true">♙</span>Профиль</button>
+</div></nav>
+<dialog id="dialog" aria-labelledby="dialog-title"><div id="dialog-body"></div></dialog>
+<script>
+const byId = id => document.getElementById(id);
+const node = (tag, className, content) => {
+  const element = document.createElement(tag);
+  if (className) element.className = className;
+  if (content !== undefined) element.textContent = content;
+  return element;
+};
+function button(text, className, action) {
+  const element = node('button',className,text);
+  element.type = 'button';
+  element.addEventListener('click',action);
+  return element;
+}
+const power = {id:'power',type:'switch',label:'Питание'};
+const brightness = {id:'brightness',type:'slider',label:'Яркость',min:0,max:100,step:1,unit:'%'};
+const kinds = {
+  humidifier:{label:'Увлажнитель',tone:'#65c9ff',icon:'≋'},
+  purifier:{label:'Очиститель',tone:'#75f4b2',icon:'✧'},
+  climate:{label:'Датчик климата',tone:'#ffb36f',icon:'◔'},
+  light:{label:'Освещение',tone:'#fdd584',icon:'☼'},
+  relay:{label:'Реле',tone:'#b6a3ff',icon:'⏻'},
+  other:{label:'Другой прибор',tone:'#b6a3ff',icon:'◉'}
+};
+const metrics = [
+  {id:'temperature',label:'Температура',unit:'°C',tone:'var(--amber)',min:0,max:40},
+  {id:'humidity',label:'Влажность',unit:'%',tone:'var(--blue)',min:0,max:100},
+  {id:'air_quality',label:'Чистота воздуха',unit:'%',tone:'var(--green)',min:0,max:100}
+];
+const climate = metrics.map(metric => ({id:metric.id,type:'sensor',label:metric.label,unit:metric.unit}));
+const seedRooms = [
+  {id:'living',name:'Гостиная'},
+  {id:'bedroom',name:'Спальня'},
+  {id:'kitchen',name:'Кухня'}
+];
+const seedDevices = [
+  {id:'humidifier',name:'Увлажнитель',kind:'humidifier',roomId:'living',online:true,capabilities:[power,{id:'target_humidity',type:'slider',label:'Целевая влажность',min:30,max:70,step:1,unit:'%'}],state:{power:true,target_humidity:50}},
+  {id:'purifier',name:'Очиститель воздуха',kind:'purifier',roomId:'living',online:true,capabilities:[power,{id:'speed',type:'slider',label:'Скорость вентилятора',min:1,max:5,step:1}],state:{power:true,speed:2}},
+  {id:'climate',name:'Датчик климата',kind:'climate',roomId:'living',online:true,capabilities:climate,state:{temperature:23.4,humidity:46,air_quality:94}},
+  {id:'bedroom-climate',name:'Датчик климата',kind:'climate',roomId:'bedroom',online:true,capabilities:climate,state:{temperature:21.8,humidity:52,air_quality:91}},
+  {id:'lamp',name:'Ночник',kind:'light',roomId:'bedroom',online:false,capabilities:[power,brightness],state:{power:false,brightness:30}},
+  {id:'relay',name:'Реле вытяжки',kind:'relay',roomId:'kitchen',online:true,capabilities:[power],state:{power:false}}
+];
+const storageKey = 'kontur-dashboard-v2';
+function loadData() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(storageKey));
+    if (saved?.rooms?.length && Array.isArray(saved.devices) && saved.profile) return saved;
+    const previous = JSON.parse(localStorage.getItem('kontur-smart-home-v1'));
+    if (Array.isArray(previous)) {
+      for (const device of previous) {
+        const match = seedDevices.find(item => item.id === device.id);
+        if (match) Object.assign(match.state,device.state);
+        else if (device.id === 'light') {
+          seedDevices.push({...device,roomId:'living',kind:'light'});
+        } else {
+          let room = seedRooms.find(item => item.name === device.room);
+          if (!room) {
+            room = {id:'room-' + seedRooms.length,name:device.room};
+            seedRooms.push(room);
+          }
+          seedDevices.push({...device,roomId:room.id,kind:'other'});
+        }
+      }
+    }
+  } catch {}
+  return {rooms:seedRooms,devices:seedDevices,profile:{name:'Владелец дома',role:'Админ'},roomId:'living'};
+}
+const data = loadData();
+let page = 'home';
+let detail;
+const water = {id:'water_level',type:'sensor',label:'Уровень воды',unit:'%',min:0,max:100,description:'Показывает остаток воды в баке увлажнителя.'};
+const humidifier = data.devices.find(device => device.id === 'humidifier');
+if (humidifier && !humidifier.capabilities.some(item => item.id === water.id)) {
+  humidifier.capabilities.push(water);
+  humidifier.state.water_level = 0;
+}
+const sensorDescriptions = {
+  temperature:'Измеряет температуру воздуха в комнате.',
+  humidity:'Измеряет относительную влажность воздуха.',
+  air_quality:'Оценивает чистоту воздуха по шкале от 0 до 100%.'
+};
+function openDetail(type,id,room='') {
+  location.hash = new URLSearchParams({page,type,id,room}).toString();
+}
+function syncRoute() {
+  const route = new URLSearchParams(location.hash.slice(1));
+  page = Object.hasOwn(pages,route.get('page')) ? route.get('page') : 'home';
+  detail = {type:route.get('type'),id:route.get('id'),room:route.get('room')};
+  if (dialog.open) dialog.close();
+  render();
+  window.scrollTo(0,0);
+}
+let roomId = data.rooms.some(room => room.id === data.roomId) ? data.roomId : data.rooms[0].id;
+const dialog = byId('dialog');
+const status = message => { byId('status').textContent = message; };
+function save(message = '') {
+  try {
+    localStorage.setItem(storageKey,JSON.stringify({...data,roomId}));
+    status(message);
+  } catch {
+    status((message ? message + ' ' : '') + 'Браузер не сохранил изменения для следующего сеанса.');
+  }
+}
+const currentRoom = () => data.rooms.find(room => room.id === roomId);
+const roomDevices = id => data.devices.filter(device => device.roomId === id);
+const kindFor = device => kinds[device.kind] ?? kinds.other;
+const idFor = () => globalThis.crypto?.randomUUID?.() ?? Date.now() + '-' + Math.random().toString(36).slice(2);
+const number = new Intl.NumberFormat('ru-RU',{maximumFractionDigits:8});
+const valueText = (value,unit) => Number.isFinite(value) ? number.format(value) + (unit ? ' ' + unit : '') : '—';
+function heading(kicker,title,description) {
+  const result = node('div','heading');
+  result.append(node('p','kicker',kicker),node('h1','',title),node('p','sub',description));
+  return result;
+}
+function sectionHead(title,action) {
+  const result = node('div','section-head');
+  result.append(node('h2','',title));
+  if (action) result.append(action);
+  return result;
+}
+function list(items,emptyText) {
+  if (!items.length) return node('p','empty',emptyText);
+  const result = node('div','stack');
+  result.append(...items);
+  return result;
+}
+function tile(title,detail,icon,tone,action) {
+  const result = button('','tile',action);
+  result.style.setProperty('--tone',tone);
+  const graphic = node('span','square',icon);
+  graphic.setAttribute('aria-hidden','true');
+  const copy = node('span');
+  copy.append(node('span','title',title),node('small','',detail));
+  const arrow = node('span','arrow','›');
+  arrow.setAttribute('aria-hidden','true');
+  result.append(graphic,copy,arrow);
+  return result;
+}
+function deviceTile(device,back) {
+  const kind = kindFor(device);
+  const connection = device.transport === 'ble-test' ? 'BLE проверен' : device.online ? 'В сети' : 'Не в сети';
+  return tile(device.name,kind.label + ' · ' + connection,kind.icon,kind.tone,() => showDevice(device,back));
+}
+function gauge(metric,devices) {
+  const source = devices.find(device => device.online && device.capabilities.some(item => item.id === metric.id && item.type === 'sensor') && Number.isFinite(device.state[metric.id]));
+  const result = makeGauge(metric,source?.state[metric.id]);
+  const note = node('p',source ? 'sub source' : 'sub missing',source ? source.name : 'Нет показаний');
+  result.card.append(note);
+  return result.card;
+}
+function makeGauge(metric,value) {
+  const available = Number.isFinite(value);
+  const result = node('article','metric');
+  result.style.setProperty('--tone',metric.tone);
+  const dial = node('div','dial');
+  const center = node('div','dial-center');
+  const reading = node('strong');
+  center.append(reading,node('small','',metric.unit ?? ''));
+  dial.append(center);
+  result.append(node('h2','',metric.label),dial);
+  function update(next) {
+    const hasValue = Number.isFinite(next);
+    const ratio = metric.max > metric.min && hasValue ? (next - metric.min) / (metric.max - metric.min) : 0;
+    result.style.setProperty('--fill',Math.max(0,Math.min(1,ratio)) * 280 + 'deg');
+    reading.textContent = hasValue ? (metric.format?.(next) ?? number.format(next)) : '—';
+  }
+  update(available ? value : undefined);
+  return {card:result,update};
+}
+function renderHome() {
+  const room = currentRoom();
+  const devices = roomDevices(room.id);
+  const panel = node('section','home-panel');
+  panel.setAttribute('aria-label','Климат комнаты «' + room.name + '»');
+  const gauges = node('div','gauges');
+  const order = ['humidity','air_quality','temperature'];
+  gauges.append(...order.map(id => gauge(metrics.find(metric => metric.id === id),devices)));
+  panel.append(gauges);
+  return [panel,warnings(devices)];
+}
+function warning(device) {
+  return device.online && device.kind === 'humidifier' && device.state.water_level === 0;
+}
+function notifyWarnings() {
+  if (globalThis.Notification?.permission !== 'granted') return;
+  for (const device of data.devices.filter(warning)) {
+    if (device.waterNotificationSent) continue;
+    try {
+      new Notification(device.name,{body:'В баке закончилась вода',tag:'kontur-water-' + device.id});
+      device.waterNotificationSent = true;
+      save();
+    } catch {
+      status('Этот браузер не поддерживает уведомления с открытой страницы.');
+    }
+  }
+}
+function warnings(devices) {
+  const section = node('section','warnings');
+  const enable = button('Включить уведомления','ghost',async () => {
+    try {
+      if (await Notification.requestPermission() !== 'granted') {
+        status('Разреши уведомления в настройках браузера.');
+        return;
+      }
+      render();
+      notifyWarnings();
+    } catch {
+      status('Уведомления недоступны в этом браузере.');
+    }
+  });
+  section.append(sectionHead('Предупреждения',globalThis.Notification?.permission === 'granted' ? null : enable));
+  section.append(list(devices.filter(warning).map(device => {
+    const kind = kindFor(device);
+    const card = tile(device.name,'В баке закончилась вода','',kind.tone,() => showDevice(device));
+    card.firstElementChild.classList.add('humidifier-picture');
+    return card;
+  }),'В этой комнате нет предупреждений.'));
+  return section;
+}
+function renderDevices() {
+  const room = currentRoom();
+  const devices = roomDevices(room.id);
+  return [
+    heading(room.name,'Приборы',''),
+    sectionHead('Список приборов',button('＋ Добавить прибор','primary',() => addDevice(room))),
+    list(devices.map(device => deviceTile(device)),'В этой комнате пока нет приборов.')
+  ];
+}
+function renderRooms() {
+  const rooms = data.rooms.map(room => {
+    const count = roomDevices(room.id).length;
+    return tile(room.name,count + ' · приборы','▦','var(--active)',() => showRoom(room));
+  });
+  return [
+    heading('Настройки дома','Комнаты',''),
+    sectionHead('Твои комнаты',button('＋ Создать комнату','primary',() => editRoom())),
+    list(rooms,'Комнат пока нет.')
+  ];
+}
+function showRoom(room) {
+  openDetail('room',room.id);
+}
+function renderRoom(room) {
+  const content = node('section','detail-page');
+  content.append(button('‹ Комнаты','ghost back',() => navigate('rooms')),heading('Настройки комнаты',room.name,''));
+  const settings = node('div','panel');
+  const reopen = render;
+  const actions = node('div','row-buttons');
+  actions.append(button('Переименовать','ghost',() => editRoom(room,reopen)),button('Добавить прибор','primary',() => addDevice(room,reopen)));
+  const devices = node('div','device-links');
+  devices.append(list(roomDevices(room.id).map(device => deviceTile(device,reopen)),'В этой комнате пока нет приборов.'));
+  settings.append(actions,devices);
+  content.append(settings);
+  return [content];
+}
+function renderProfile() {
+  const profile = node('div','panel');
+  const top = node('div','profile');
+  const initials = data.profile.name.split(/\s+/).slice(0,2).map(part => Array.from(part)[0]).join('').toUpperCase();
+  const copy = node('div');
+  copy.append(node('h2','',data.profile.name),node('p','muted','Локальный профиль'));
+  top.append(node('span','square',initials),copy,node('span','tag',data.profile.role));
+  profile.append(top,button('Изменить имя','ghost',editProfile));
+  return [heading('Настройки аккаунта','Профиль','Имя и роль в доме'),profile];
+}
+const pages = {home:renderHome,devices:renderDevices,rooms:renderRooms,profile:renderProfile};
+function render() {
+  const picker = byId('room-picker');
+  picker.replaceChildren(...data.rooms.map(room => {
+    const option = node('option','',room.name);
+    option.value = room.id;
+    return option;
+  }));
+  picker.value = roomId;
+  for (const tab of byId('nav').children) {
+    if (tab.dataset.page === page) tab.setAttribute('aria-current','page');
+    else tab.removeAttribute('aria-current');
+  }
+  const room = detail?.type === 'room' && data.rooms.find(item => item.id === detail.id);
+  const device = detail?.type === 'device' && data.devices.find(item => item.id === detail.id);
+  byId('screen').replaceChildren(...(room ? renderRoom(room) : device ? renderDevice(device) : pages[page]()));
+}
+function navigate(next) {
+  detail = undefined;
+  location.hash = 'page=' + next;
+  page = next;
+  status('');
+  render();
+  window.scrollTo(0,0);
+}
+function selectRoom(next) {
+  roomId = next;
+  render();
+  save();
+}
+function modal(title) {
+  const content = byId('dialog-body');
+  const heading = node('h2','',title);
+  heading.id = 'dialog-title';
+  content.replaceChildren(heading);
+  if (!dialog.open) dialog.showModal();
+  dialog.scrollTop = 0;
+  return content;
+}
+function formModal(title,submitText,back) {
+  const content = modal(title);
+  const form = node('form');
+  const error = node('p','error');
+  error.setAttribute('role','alert');
+  error.hidden = true;
+  const actions = node('div','actions');
+  const submit = node('button','primary',submitText);
+  submit.type = 'submit';
+  actions.append(button('Отмена','ghost',() => dialog.close()),submit);
+  form.append(error,actions);
+  content.append(form);
+  return {form,error,actions};
+}
+function field(form,error,label,id,element) {
+  const text = node('label','',label);
+  text.htmlFor = id;
+  element.id = id;
+  form.insertBefore(text,error);
+  form.insertBefore(element,error);
+}
+function nameField(value) {
+  const input = node('input');
+  input.type = 'text';
+  input.value = value;
+  input.required = true;
+  input.maxLength = 60;
+  return input;
+}
+function showError(error,message) {
+  error.textContent = message;
+  error.hidden = false;
+}
+function complete(message,back) {
+  dialog.close();
+  render();
+  save(message);
+  if (back) back();
+}
+function editRoom(room,back) {
+  const {form,error} = formModal(room ? 'Изменить комнату' : 'Создать комнату','Сохранить',back);
+  const input = nameField(room?.name ?? '');
+  field(form,error,'Название комнаты','edit-room-name',input);
+  input.focus();
+  form.addEventListener('submit',event => {
+    event.preventDefault();
+    const name = input.value.trim();
+    if (!name) return showError(error,'Введи название комнаты.');
+    if (data.rooms.some(item => item.id !== room?.id && item.name.toLocaleLowerCase('ru') === name.toLocaleLowerCase('ru'))) return showError(error,'Комната с таким названием уже есть.');
+    if (room) room.name = name;
+    else {
+      const created = {id:idFor(),name};
+      data.rooms.push(created);
+      roomId = created.id;
+    }
+    complete(room ? 'Название комнаты обновлено.' : 'Комната создана.',back);
+  });
+}
+function editProfile() {
+  const {form,error} = formModal('Изменить имя','Сохранить');
+  const input = nameField(data.profile.name);
+  field(form,error,'Имя','profile-name',input);
+  input.focus();
+  form.addEventListener('submit',event => {
+    event.preventDefault();
+    const name = input.value.trim();
+    if (!name) return showError(error,'Введи имя.');
+    data.profile.name = name;
+    complete('Имя профиля обновлено.');
+  });
+}
+function control(device,capability,updateGauge) {
+  const result = node('div','control');
+  const row = node('div','line');
+  const label = node('span','',capability.label);
+  const value = Object.hasOwn(device.state,capability.id) ? device.state[capability.id] : undefined;
+  row.append(label);
+  result.append(row);
+  if (capability.type === 'switch') {
+    const toggle = button('','switch',() => {
+      const next = toggle.getAttribute('aria-checked') !== 'true';
+      toggle.setAttribute('aria-checked',String(next));
+      device.state[capability.id] = next;
+      updateGauge?.(Number(next));
+      save();
+    });
+    toggle.setAttribute('role','switch');
+    toggle.setAttribute('aria-label',capability.label);
+    toggle.setAttribute('aria-checked',String(Boolean(value)));
+    toggle.disabled = !device.online;
+    row.append(toggle);
+  } else {
+    const reading = node('output','reading',valueText(value,capability.unit));
+    row.append(reading);
+    if (capability.type === 'slider') {
+      const input = node('input');
+      input.type = 'range';
+      input.min = capability.min;
+      input.max = capability.max;
+      input.step = capability.step;
+      input.value = value ?? capability.min;
+      input.disabled = !device.online;
+      input.setAttribute('aria-label',capability.label);
+      input.addEventListener('input',() => {
+        reading.textContent = valueText(input.valueAsNumber,capability.unit);
+        updateGauge?.(input.valueAsNumber);
+      });
+      input.addEventListener('change',() => {
+        device.state[capability.id] = input.valueAsNumber;
+        save();
+      });
+      result.append(input);
+    }
+  }
+  return result;
+}
+function showDevice(device,back) {
+  openDetail('device',device.id,back ? device.roomId : '');
+}
+function renderDevice(device) {
+  const content = node('section','detail-page');
+  content.append(button('‹ Назад','ghost back',() => {
+    if (detail.room) openDetail('room',detail.room);
+    else navigate(page);
+  }));
+  const kind = kindFor(device);
+  const controls = node('div');
+  controls.style.setProperty('--tone',kind.tone);
+  const panel = node('section','home-panel detail-panel');
+  panel.setAttribute('aria-label','Показания прибора');
+  const gauges = node('div','gauges');
+  panel.append(gauges);
+  for (const capability of device.capabilities) {
+    if (capability.type === 'switch') {
+      const metric = {...capability,tone:kind.tone,min:0,max:1,format:value => value ? 'Вкл.' : 'Выкл.'};
+      const indicator = makeGauge(metric,Number(Boolean(device.state[capability.id])));
+      gauges.append(indicator.card);
+      controls.append(control(device,capability,indicator.update));
+      continue;
+    }
+    const metric = {...metrics.find(item => item.id === capability.id),...capability,tone:kind.tone};
+    const value = device.state[capability.id];
+    const indicator = makeGauge(metric,value);
+    gauges.append(indicator.card);
+    if (capability.type === 'slider') controls.append(control(device,capability,indicator.update));
+  }
+  content.append(heading(kind.label,device.name,device.transport === 'ble-test' ? 'BLE проверен. Плата передаёт идентификатор.' : device.online ? 'В сети' : 'Не в сети'));
+  if (gauges.childElementCount) {
+    panel.prepend(node('h2','','Показатели работы'));
+    content.append(panel);
+  }
+  if (controls.childElementCount) {
+    const settings = node('section','panel');
+    settings.append(node('h2','','Настройки прибора'),controls);
+    if (device.capabilities.some(item => item.id === 'power' && item.type === 'switch')) settings.append(scheduleControls(device));
+    content.append(settings);
+  }
+  const sensors = device.capabilities.filter(item => item.type === 'sensor');
+  if (sensors.length) {
+    const section = node('section','panel');
+    section.append(node('h2','','Датчики'));
+    for (const sensor of sensors) {
+      const entry = node('div','control');
+      entry.append(node('strong','',sensor.label),node('div','muted',sensor.description || sensorDescriptions[sensor.id] || 'Текущее показание датчика.'));
+      section.append(entry);
+    }
+    content.append(section);
+  }
+  return [content];
+}
+
+const periods = [[15,'15 минут'],[30,'30 минут'],[60,'1 час'],[120,'2 часа'],[240,'4 часа'],[480,'8 часов'],[1440,'24 часа']];
+function startInterval(schedule, now) {
+  schedule.nextRun = now + (schedule.period ?? 60) * 60000;
+}
+function scheduleControls(device) {
+  if (device.kind !== 'humidifier') return dailyScheduleControls(device);
+  const section = node('section','control');
+  section.append(node('h3','','Расписание'));
+  const modes = node('div','schedule-modes');
+  const mode = device.schedule?.mode;
+  for (const [id,label] of [['interval','Включать каждые…'],['auto','Авто']]) {
+    const choice = button(label,mode === id ? 'primary' : 'ghost',() => {
+      const settings = device.schedule ??= {};
+      settings.mode = mode === id ? 'manual' : id;
+      if (settings.mode === 'interval') startInterval(settings,Date.now());
+      save();
+      if (!runHumidifierSchedules(Date.now())) render();
+      byId('schedule-mode-' + id)?.focus();
+    });
+    choice.id = 'schedule-mode-' + id;
+    choice.setAttribute('aria-pressed',String(mode === id));
+    modes.append(choice);
+  }
+  section.append(modes);
+  if (mode === 'interval' || mode === 'auto') {
+    const settings = device.schedule;
+    const interval = mode === 'interval';
+    const input = node(interval ? 'select' : 'input');
+    input.id = 'schedule-value';
+    const label = node('label','',interval ? 'Период' : 'Целевая влажность, %');
+    label.htmlFor = input.id;
+    if (interval) {
+      for (const [minutes,text] of periods) {
+        const option = node('option','',text);
+        option.value = String(minutes);
+        input.append(option);
+      }
+      input.value = String(settings.period ?? 60);
+    } else {
+      input.type = 'number';
+      input.min = 1;
+      input.max = 100;
+      input.step = 1;
+      input.required = true;
+      input.value = String(settings.threshold ?? device.state.target_humidity ?? 50);
+    }
+    input.addEventListener('change',() => {
+      if (!input.reportValidity()) return;
+      if (interval) {
+        settings.period = Number(input.value);
+        startInterval(settings,Date.now());
+      } else settings.threshold = Number(input.value);
+      save('Расписание сохранено.');
+      runHumidifierSchedules(Date.now());
+    });
+    const row = node('div','schedule-row');
+    row.append(label,input);
+    section.append(row);
+  }
+  if (mode === 'interval') section.append(node('p','field-note','Прибор включается через заданный период. Выключение вручную.'));
+  if (mode === 'auto') section.append(node('p','field-note',roomHumidity(device) === undefined
+    ? 'Для авторежима нужны показания датчика влажности в этой комнате.'
+    : 'Включается ниже порога и выключается при его достижении.'));
+  section.append(node('p','field-note','Повторное нажатие отключает режим. Автоматика работает, пока панель открыта.'));
+  return section;
+}
+function roomHumidity(device) {
+  const source = roomDevices(device.roomId).find(item => item.online &&
+    item.capabilities.some(capability => capability.id === 'humidity' && capability.type === 'sensor') &&
+    Number.isFinite(item.state.humidity));
+  return source?.state.humidity;
+}
+function runHumidifierSchedules(now) {
+  let powerChanged = false;
+  let scheduleChanged = false;
+  for (const device of data.devices) {
+    const schedule = device.schedule;
+    if (!device.online || device.kind !== 'humidifier' || !schedule) continue;
+    let power;
+    if (schedule.mode === 'auto') {
+      const humidity = roomHumidity(device);
+      if (humidity !== undefined) power = humidity < (schedule.threshold ?? device.state.target_humidity ?? 50);
+    } else if (schedule.mode === 'interval' && now >= schedule.nextRun) {
+      const period = (schedule.period ?? 60)*60000;
+      schedule.nextRun += (Math.floor((now - schedule.nextRun)/period) + 1)*period;
+      scheduleChanged = true;
+      power = true;
+    }
+    if (power !== undefined && power !== device.state.power) {
+      device.state.power = power;
+      powerChanged = true;
+    }
+  }
+  if (powerChanged || scheduleChanged) save();
+  if (powerChanged && !dialog.open) render();
+  return powerChanged && !dialog.open;
+}
+function dailyScheduleControls(device) {
+  const section = node('section','control');
+  section.append(node('h3','','Расписание'));
+  for (const [key,label] of [['on','Включать в'],['off','Выключать в']]) {
+    const row = node('div','schedule-row');
+    const input = node('input');
+    input.type = 'time';
+    input.id = 'schedule-' + key;
+    input.value = device.schedule?.[key] ?? '';
+    const caption = node('label','',label);
+    caption.htmlFor = input.id;
+    function update() {
+      device.schedule ??= {};
+      device.schedule[key] = input.value;
+      save('Расписание сохранено.');
+    }
+    input.addEventListener('change',update);
+    row.append(caption,input,button('Очистить','ghost',() => {
+      input.value = '';
+      update();
+    }));
+    section.append(row);
+  }
+  section.append(node('p','field-note','Срабатывает ежедневно по местному времени, пока панель открыта.'));
+  return section;
+}
+let lastMinute;
+function runSchedules() {
+  const now = new Date();
+  runHumidifierSchedules(now.getTime());
+  const minute = Math.floor(now.getTime()/60000);
+  if (minute === lastMinute) return;
+  lastMinute = minute;
+  const time = [now.getHours(),now.getMinutes()].map(value => String(value).padStart(2,'0')).join(':');
+  let changed = false;
+  for (const device of data.devices) {
+    if (!device.online || !device.schedule || device.schedule.mode) continue;
+    const power = device.schedule.off === time ? false : device.schedule.on === time ? true : undefined;
+    if (power !== undefined && device.state.power !== power) {
+      device.state.power = power;
+      changed = true;
+    }
+  }
+  if (changed) {
+    save();
+    if (!dialog.open) render();
+  }
+}
+function parseManifest(raw) {
+  let manifest;
+  try { manifest = JSON.parse(raw); }
+  catch { throw new Error('Проверь синтаксис JSON.'); }
+  if (manifest?.schemaVersion !== 1 || !Array.isArray(manifest.capabilities) || manifest.capabilities.length < 1 || manifest.capabilities.length > 20) throw new Error('Укажи schemaVersion: 1 и от 1 до 20 функций в capabilities.');
+  const ids = new Set();
+  for (const item of manifest.capabilities) {
+    if (!item || typeof item.id !== 'string' || !/^[a-z][a-z0-9_-]{0,39}$/.test(item.id) || ids.has(item.id)) throw new Error('У каждой функции должен быть уникальный id. Начни со строчной латинской буквы и используй буквы, цифры, дефисы или подчёркивания.');
+    ids.add(item.id);
+    if (!['switch','slider','sensor'].includes(item.type) || typeof item.label !== 'string' || !item.label.trim() || item.label.length > 60 || (item.unit !== undefined && (typeof item.unit !== 'string' || item.unit.length > 12))) throw new Error('Укажи label и тип switch, slider или sensor. Единица измерения unit — короткая строка.');
+    if (item.type === 'slider' && (![item.min,item.max,item.step,item.max-item.min].every(Number.isFinite) || item.max <= item.min || item.step <= 0 || item.step > item.max - item.min)) throw new Error('Для slider укажи числа min, max и положительный step в пределах диапазона.');
+  }
+  return manifest.capabilities;
+}
+const bleService = '933f3720-bc7f-4dd1-b631-ab694240dd81';
+const bleIdentity = '933f3721-bc7f-4dd1-b631-ab694240dd81';
+async function connectHumidifier(room,back,feedback,search) {
+  if (!navigator.bluetooth) {
+    feedback.textContent = 'Открой панель в Chrome на компьютере с Bluetooth.';
+    return;
+  }
+  let peripheral;
+  search.disabled = true;
+  try {
+    feedback.textContent = 'Выбери «Увлажнитель» в списке браузера.';
+    peripheral = await navigator.bluetooth.requestDevice({filters:[{services:[bleService]}]});
+    const server = await peripheral.gatt.connect();
+    const service = await server.getPrimaryService(bleService);
+    const characteristic = await service.getCharacteristic(bleIdentity);
+    const identity = JSON.parse(new TextDecoder().decode(await characteristic.readValue()));
+    if (identity?.v !== 1 || identity.kind !== 'humidifier' || typeof identity.id !== 'string' || !/^[0-9a-f]{12}$/.test(identity.id)) {
+      feedback.textContent = 'Плата вернула неизвестный формат данных.';
+      return;
+    }
+    if (!search.isConnected || !dialog.open) return;
+    const id = 'ble-' + identity.id;
+    const existing = data.devices.find(device => device.id === id);
+    if (existing && existing.roomId !== room.id) {
+      const previousRoom = data.rooms.find(item => item.id === existing.roomId);
+      feedback.textContent = 'Этот прибор уже добавлен в комнату «' + (previousRoom?.name ?? 'без названия') + '».';
+      return;
+    }
+    if (!existing) data.devices.push({
+      id,name:'Увлажнитель (ESP32)',kind:'humidifier',roomId:room.id,online:false,
+      transport:'ble-test',capabilities:[],state:{}
+    });
+    complete('BLE проверен. Панель прочитала идентификатор платы ' + identity.id + '.',back);
+  } catch (error) {
+    feedback.textContent = error.name === 'NotFoundError'
+      ? 'Прибор не выбран. Проверь питание ESP32 и повтори поиск.'
+      : 'Не удалось прочитать данные по Bluetooth: ' + error.message;
+  } finally {
+    if (peripheral?.gatt?.connected) peripheral.gatt.disconnect();
+    search.disabled = false;
+  }
+}
+const pairing = {
+  humidifier:'Удерживай кнопку питания 10 секунд, пока индикатор не начнёт мигать.',
+  purifier:'Удерживай кнопку Wi-Fi 5 секунд, пока индикатор сети не начнёт мигать.',
+  climate:'Удерживай кнопку сопряжения 3 секунды.',
+  light:'Удерживай кнопку питания 5 секунд, пока лампа не мигнёт.',
+  relay:'Удерживай кнопку SET 5 секунд, пока светодиод не начнёт мигать.',
+  other:'Переведи прибор в режим подключения по его инструкции.'
+};
+function addDevice(room,back) {
+  const content = modal('Подключение прибора');
+  const models = node('select');
+  models.setAttribute('aria-label','Тип прибора');
+  for (const [id,kind] of Object.entries(kinds)) {
+    const option = node('option','',kind.label);
+    option.value = id;
+    models.append(option);
+  }
+  models.value = 'humidifier';
+  const hint = node('p','sub');
+  const feedback = node('p','sub');
+  feedback.setAttribute('role','status');
+  const search = button('Найти ESP32 по Bluetooth','primary',() => connectHumidifier(room,back,feedback,search));
+  const found = node('div','device-links');
+  function waitForSignal() {
+    hint.textContent = pairing[models.value];
+    search.hidden = models.value !== 'humidifier';
+    feedback.textContent = search.hidden ? '' : 'Тестовая прошивка подаёт сигнал сразу после включения платы.';
+    found.replaceChildren(node('p','muted','Ожидание сигнала'));
+  }
+  models.addEventListener('change',waitForSignal);
+  waitForSignal();
+  const actions = node('div','actions');
+  actions.append(button('Вручную','ghost',() => addDeviceManually(room,back)),button('Сымитировать сигнал','primary',() => {
+    const type = models.value;
+    const kind = kinds[type];
+    const template = data.devices.find(item => item.kind === type);
+    found.replaceChildren(tile(kind.label,'Демоустройство обнаружено',kind.icon,kind.tone,() => {
+      const capabilities = template?.capabilities ?? [power];
+      const state = {...(template?.state ?? {power:false})};
+      if (type === 'humidifier') state.water_level = 100;
+      data.devices.push({id:idFor(),name:kind.label,kind:type,roomId:room.id,online:true,capabilities,state});
+      complete('Прибор подключён к комнате «' + room.name + '».',back);
+    }));
+  }),button('Закрыть','ghost',() => dialog.close()));
+  content.append(models,hint,search,feedback,found,actions);
+  models.focus();
+}
+function addDeviceManually(room,back) {
+  const {form,error} = formModal('Добавить прибор','Добавить',back);
+  const mode = node('select');
+  const create = node('option','','Новое демоустройство');
+  create.value = '';
+  mode.append(create);
+  for (const device of data.devices.filter(item => item.roomId !== room.id)) {
+    const source = data.rooms.find(item => item.id === device.roomId);
+    const option = node('option','',device.name + ' · из комнаты «' + (source?.name ?? 'Без комнаты') + '»');
+    option.value = device.id;
+    mode.append(option);
+  }
+  const name = nameField('');
+  const kind = node('select');
+  for (const [id,item] of Object.entries(kinds)) {
+    const option = node('option','',item.label);
+    option.value = id;
+    kind.append(option);
+  }
+  kind.value = 'other';
+  const manifest = node('textarea');
+  manifest.required = true;
+  manifest.spellcheck = false;
+  manifest.value = JSON.stringify({schemaVersion:1,capabilities:[power,brightness]},null,2);
+  field(form,error,'Прибор','device-mode',mode);
+  const group = node('div');
+  const stop = node('span');
+  group.append(stop);
+  field(group,stop,'Название','device-name',name);
+  field(group,stop,'Тип и цвет акцента','device-kind',kind);
+  field(group,stop,'Функции (JSON)','device-manifest',manifest);
+  stop.remove();
+  form.insertBefore(group,error);
+  mode.addEventListener('change',() => {
+    group.hidden = Boolean(mode.value);
+    name.disabled = group.hidden;
+    manifest.disabled = group.hidden;
+    error.hidden = true;
+  });
+  mode.focus();
+  form.addEventListener('submit',event => {
+    event.preventDefault();
+    if (mode.value) {
+      const device = data.devices.find(item => item.id === mode.value);
+      if (!device) return showError(error,'Выбери прибор из списка.');
+      device.roomId = room.id;
+      return complete('Прибор перемещён в комнату «' + room.name + '».',back);
+    }
+    const title = name.value.trim();
+    if (!title) return showError(error,'Введи название прибора.');
+    let capabilities;
+    try { capabilities = parseManifest(manifest.value); }
+    catch (failure) { return showError(error,failure.message); }
+    const state = Object.fromEntries(capabilities.filter(item => item.type !== 'sensor').map(item => [item.id,item.type === 'switch' ? false : item.min]));
+    data.devices.push({id:idFor(),name:title,kind:kind.value,roomId:room.id,online:true,capabilities,state});
+    complete('Прибор добавлен в комнату «' + room.name + '».',back);
+  });
+}
+for (const tab of byId('nav').children) tab.addEventListener('click',() => navigate(tab.dataset.page));
+byId('room-picker').addEventListener('change',event => {
+  const selected = event.target.value;
+  if (detail?.type) navigate(page);
+  selectRoom(selected);
+});
+window.addEventListener('hashchange',syncRoute);
+syncRoute();
+runSchedules();
+notifyWarnings();
+setInterval(runSchedules,1000);
+</script>
+</body>
+</html>
+
