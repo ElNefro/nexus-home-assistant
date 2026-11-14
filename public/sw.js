@@ -1,16 +1,16 @@
 'use strict';
 
-const cacheName = 'kontur-shell-1.3.0';
+const cacheName = 'kontur-shell-1.3.1';
 const shell = [
-  './','./index.html','./offline.html','./styles.css','./app.js','./i18n.js',
-  './storage.js','./ble.js','./platform.js','./manifest.webmanifest',
-  './icons/kontur-192.png','./icons/kontur-512.png','./automation.js','./lan.js','./images/room-dome.png'
+  './','./index.html','./offline.html','./styles.css?v=1.3.1','./app.js?v=1.3.1','./i18n.js',
+  './storage.js?v=1.3.1','./ble.js?v=1.3.1','./platform.js?v=1.3.1','./manifest.webmanifest',
+  './icons/kontur-192.png','./icons/kontur-512.png','./automation.js?v=1.3.1','./lan.js?v=1.3.1','./images/room-dome.png'
 ];
 const shellUrls = new Set(shell.map(path => new URL(path,self.registration.scope).href));
 
 self.addEventListener('install',event => {
   event.waitUntil(caches.open(cacheName).then(cache =>
-    cache.addAll(shell.map(url => new Request(url,{cache:'reload'})))
+    cache.addAll(shell.map(url => new Request(url,{cache:'reload'}))).then(() => self.skipWaiting())
   ));
 });
 

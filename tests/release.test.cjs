@@ -98,7 +98,7 @@ test('all scripts parse and the PWA shell references real files',() => {
     new vm.Script(fs.readFileSync('public/' + path,'utf8'),{filename:path});
   }
   const urls = fs.readFileSync('public/sw.js','utf8').match(/const shell = \[([\s\S]*?)\];/)[1];
-  const assets = [...urls.matchAll(/'\.\/([^']+)'/g)].map(match => match[1]);
+  const assets = [...urls.matchAll(/'\.\/([^']+)'/g)].map(match => match[1].split('?')[0]);
   for (const asset of assets) assert.ok(fs.existsSync('public/' + asset),asset);
   const manifest = JSON.parse(fs.readFileSync('public/manifest.webmanifest','utf8'));
   for (const icon of manifest.icons) {
