@@ -1,10 +1,10 @@
 'use strict';
 
-const cacheName = 'kontur-shell-1.1.0';
+const cacheName = 'kontur-shell-1.3.0';
 const shell = [
   './','./index.html','./offline.html','./styles.css','./app.js','./i18n.js',
   './storage.js','./ble.js','./platform.js','./manifest.webmanifest',
-  './icons/kontur-192.png','./icons/kontur-512.png'
+  './icons/kontur-192.png','./icons/kontur-512.png','./automation.js','./lan.js','./images/room-dome.png'
 ];
 const shellUrls = new Set(shell.map(path => new URL(path,self.registration.scope).href));
 

@@ -20,6 +20,7 @@ const kinds = {
   climate:{label:'Датчик климата',tone:'#ffb36f',icon:'◔'},
   light:{label:'Освещение',tone:'#fdd584',icon:'☼'},
   relay:{label:'Реле',tone:'#b6a3ff',icon:'⏻'},
+  feeder:{label:'Кормушка',tone:'#ffb36f',icon:'◒'},
   other:{label:'Другой прибор',tone:'#b6a3ff',icon:'◉'}
 };
 const metrics = [
@@ -68,7 +69,10 @@ function loadData() {
 }
 const data = loadData();
 const bleSessions = new Map();
-const busyBle = new Set();
+const lanSessions = new Map();
+const measuredAt = new Map();
+const automationRetryAt = new Map();
+const busyDevices = new Set();
 let page = 'home';
 let detail;
 const water = {id:'water_level',type:'sensor',label:'Уровень воды',unit:'%',min:0,max:100,description:'Показывает остаток воды в баке увлажнителя.'};
@@ -147,6 +151,7 @@ function tile(title,detail,icon,tone,action) {
   return result;
 }
 function deviceStatus(device) {
+  if (device.transport === 'lan') return device.online ? t('Подключён по Wi-Fi') : t('Добавлен по Wi-Fi') + ' · ' + t('Не в сети');
   if (device.transport === 'ble') return device.online ? t('Подключён по Bluetooth') : t('Отключён');
   if (device.transport === 'ble-test') return t('BLE проверен');
   return t('Демо-режим') + ' · ' + (device.online ? t('В сети') : t('Не в сети'));
@@ -157,7 +162,8 @@ function deviceTile(device,back) {
   return tile(deviceName(device),t(kind.label) + ' · ' + connection,kind.icon,kind.tone,() => showDevice(device,back));
 }
 function gauge(metric,devices) {
-  const source = devices.find(device => device.online && device.capabilities.some(item => item.id === metric.id && item.type === 'sensor') && Number.isFinite(device.state[metric.id]));
+  const sources = devices.filter(device => device.online && device.capabilities.some(item => item.id === metric.id && item.type === 'sensor') && Number.isFinite(device.state[metric.id]));
+  const source = sources.find(device => device.transport) ?? sources[0];
   const result = makeGauge({...metric,label:t(metric.label)},source?.state[metric.id]);
   const note = node('p',source ? 'sub source' : 'sub missing',source ? deviceName(source) : t('Нет показаний'));
   result.card.append(note);
@@ -191,7 +197,17 @@ function renderHome() {
   const order = ['humidity','air_quality','temperature'];
   gauges.append(...order.map(id => gauge(metrics.find(metric => metric.id === id),devices)));
   panel.append(gauges);
-  return [panel,warnings(devices)];
+  const hero = node('section','room-hero');
+  const copy = node('div','room-hero-copy');
+  copy.append(node('p','kicker',t('Умный дом')),node('h1','',roomName(room)),
+    node('p','sub',deviceCount(devices.length)));
+  const illustration = node('img','room-art');
+  illustration.src = './images/room-dome.png';
+  illustration.alt = '';
+  illustration.width = 1536;
+  illustration.height = 1024;
+  hero.append(copy,illustration);
+  return [hero,panel,warnings(devices)];
 }
 function warning(device) {
   return device.online && device.kind === 'humidifier' && device.state.water_level === 0;
@@ -350,6 +366,9 @@ function restoreBackup() {
       if (!dialog.open || !form.isConnected) return;
       for (const session of bleSessions.values()) session.disconnect();
       bleSessions.clear();
+      lanSessions.clear();
+      measuredAt.clear();
+      automationRetryAt.clear();
       Object.assign(data,restored);
       migrateWater();
       roomId = restored.roomId;
@@ -503,7 +522,7 @@ function control(device,capability,updateGauge) {
     toggle.setAttribute('role','switch');
     toggle.setAttribute('aria-label',capabilityLabel(device,capability));
     toggle.setAttribute('aria-checked',String(Boolean(value)));
-    toggle.disabled = !device.online || busyBle.has(device.id);
+    toggle.disabled = !device.online || busyDevices.has(device.id);
     row.append(toggle);
   } else {
     const reading = node('output','reading',valueText(value,capability.unit));
@@ -515,7 +534,7 @@ function control(device,capability,updateGauge) {
       input.max = capability.max;
       input.step = capability.step;
       input.value = value ?? capability.min;
-      input.disabled = !device.online || busyBle.has(device.id);
+      input.disabled = !device.online || busyDevices.has(device.id);
       input.setAttribute('aria-label',capabilityLabel(device,capability));
       input.addEventListener('input',() => {
         reading.textContent = valueText(input.valueAsNumber,capability.unit);
@@ -553,13 +572,13 @@ function renderDevice(device) {
   for (const capability of device.capabilities) {
     if (capability.type === 'switch') {
       const metric = {...capability,label:capabilityLabel(device,capability),tone:kind.tone,min:0,max:1,format:value => value ? t('Вкл.') : t('Выкл.')};
-      const indicator = makeGauge(metric,Number(Boolean(device.state[capability.id])));
+      const indicator = makeGauge(metric,typeof device.state[capability.id] === 'boolean' ? Number(device.state[capability.id]) : undefined);
       gauges.append(indicator.card);
       controls.append(control(device,capability,indicator.update));
       continue;
     }
     const metric = {...metrics.find(item => item.id === capability.id),...capability,label:capabilityLabel(device,capability),tone:kind.tone};
-    const value = device.state[capability.id];
+    const value = Object.hasOwn(device.state,capability.id) ? device.state[capability.id] : undefined;
     const indicator = makeGauge(metric,value);
     gauges.append(indicator.card);
     if (capability.type === 'slider') controls.append(control(device,capability,indicator.update));
@@ -568,7 +587,7 @@ function renderDevice(device) {
   const actions = node('div','row-buttons');
   actions.append(button(t('Удалить прибор'),'ghost',() => confirmRemoveDevice(device)));
   content.append(actions);
-  if (device.transport) {
+  if (device.transport === 'ble' || device.transport === 'ble-test') {
     const connection = node('section','panel');
     const action = device.online
       ? button(t('Отключить Bluetooth'),'ghost',() => bleSessions.get(device.id)?.disconnect())
@@ -580,6 +599,11 @@ function renderDevice(device) {
     connection.append(node('h2','',t('Тестовая плата')),node('p','sub',t('Тестовая прошивка передаёт имитацию показаний.')),action,connectionStatus);
     content.append(connection);
   }
+  if (device.transport === 'lan' && !device.online) {
+    const connection = node('section','panel');
+    connection.append(button(t('Найти в сети'),'primary',() => addDevice(data.rooms.find(room => room.id === device.roomId))));
+    content.append(connection);
+  }
   if (gauges.childElementCount) {
     panel.prepend(node('h2','',t('Показатели работы')));
     content.append(panel);
@@ -587,7 +611,7 @@ function renderDevice(device) {
   if (controls.childElementCount) {
     const settings = node('section','panel');
     settings.append(node('h2','',t('Настройки прибора')),controls);
-    if (!device.transport && device.capabilities.some(item => item.id === 'power' && item.type === 'switch')) settings.append(scheduleControls(device));
+    if (konturAutomation.supportsMode(device,'interval')) settings.append(scheduleControls(device));
     content.append(settings);
   }
   const sensors = device.capabilities.filter(item => item.type === 'sensor');
@@ -614,6 +638,9 @@ function confirmRemoveDevice(device) {
     if (index === -1) return showError(error,t('Прибор уже удалён.'));
     const session = bleSessions.get(device.id);
     bleSessions.delete(device.id);
+    lanSessions.delete(device.id);
+    measuredAt.delete(device.id);
+    automationRetryAt.delete(device.id);
     session?.disconnect();
     data.devices.splice(index,1);
     dialog.close();
@@ -624,23 +651,25 @@ function confirmRemoveDevice(device) {
   });
 }
 
-const periods = [[15,'15 минут'],[30,'30 минут'],[60,'1 час'],[120,'2 часа'],[240,'4 часа'],[480,'8 часов'],[1440,'24 часа']];
-function startInterval(schedule, now) {
-  schedule.nextRun = now + (schedule.period ?? 60) * 60000;
+const periods = ['15 минут','30 минут','1 час','2 часа','4 часа','8 часов','24 часа'];
+function startInterval(schedule) {
+  schedule.nextRun = Date.now() + konturAutomation.periodMs(schedule.period);
 }
 function scheduleControls(device) {
-  if (device.kind !== 'humidifier') return dailyScheduleControls(device);
   const section = node('section','control');
   section.append(node('h3','',t('Расписание')));
   const modes = node('div','schedule-modes');
   const mode = device.schedule?.mode;
-  for (const [id,label] of [['interval',t('Включать каждые…')],['auto',t('Авто')]]) {
-    const choice = button(label,mode === id ? 'primary' : 'ghost',() => {
+  const available = [['interval','Включать каждые…'],['auto','Авто']]
+    .filter(([id]) => konturAutomation.supportsMode(device,id));
+  for (const [id,label] of available) {
+    const choice = button(t(label),mode === id ? 'primary' : 'ghost',() => {
       const settings = device.schedule ??= {};
       settings.mode = mode === id ? 'manual' : id;
-      if (settings.mode === 'interval') startInterval(settings,Date.now());
+      if (settings.mode === 'interval') startInterval(settings);
       save();
-      if (!runHumidifierSchedules(Date.now())) render();
+      runSchedules();
+      render();
       byId('schedule-mode-' + id)?.focus();
     });
     choice.id = 'schedule-mode-' + id;
@@ -648,19 +677,21 @@ function scheduleControls(device) {
     modes.append(choice);
   }
   section.append(modes);
-  if (mode === 'interval' || mode === 'auto') {
+  if (mode === 'interval' || mode === 'auto' && konturAutomation.supportsMode(device,mode)) {
     const settings = device.schedule;
     const interval = mode === 'interval';
     const input = node(interval ? 'select' : 'input');
     input.id = 'schedule-value';
-    const label = node('label','',interval ? t('Период') : t('Целевая влажность, %'));
+    const metric = konturAutomation.autoMetric(device);
+    const labelText = metric === 'air_quality' ? 'Порог чистоты воздуха, %' : 'Целевая влажность, %';
+    const label = node('label','',t(interval ? 'Период' : labelText));
     label.htmlFor = input.id;
     if (interval) {
-      for (const [minutes,text] of periods) {
-        const option = node('option','',t(text));
+      konturAutomation.periods.forEach((minutes,index) => {
+        const option = node('option','',t(periods[index]));
         option.value = String(minutes);
         input.append(option);
-      }
+      });
       input.value = String(settings.period ?? 60);
     } else {
       input.type = 'number';
@@ -668,106 +699,83 @@ function scheduleControls(device) {
       input.max = 100;
       input.step = 1;
       input.required = true;
-      input.value = String(settings.threshold ?? device.state.target_humidity ?? 50);
+      input.value = String(konturAutomation.autoThreshold(device,settings));
     }
     input.addEventListener('change',() => {
       if (!input.reportValidity()) return;
       if (interval) {
         settings.period = Number(input.value);
-        startInterval(settings,Date.now());
+        startInterval(settings);
       } else settings.threshold = Number(input.value);
       save(t('Расписание сохранено.'));
-      runHumidifierSchedules(Date.now());
+      runSchedules();
     });
     const row = node('div','schedule-row');
     row.append(label,input);
     section.append(row);
+    if (mode === 'auto') {
+      section.append(node('p','field-note',t(roomMeasurement(device,metric) === undefined
+        ? 'Авто ожидает показания датчика в этой комнате.'
+        : 'Включается ниже порога и выключается при его достижении.')));
+    } else section.append(node('p','field-note',t('Прибор включается через заданный период. Выключение вручную.')));
   }
-  if (mode === 'interval') section.append(node('p','field-note',t('Прибор включается через заданный период. Выключение вручную.')));
-  if (mode === 'auto') section.append(node('p','field-note',roomHumidity(device) === undefined
-    ? t('Для авторежима нужны показания датчика влажности в этой комнате.')
-    : t('Включается ниже порога и выключается при его достижении.')));
+  if (!mode && (device.schedule?.on || device.schedule?.off)) {
+    section.append(node('p','field-note',t('Прежнее расписание действует до выбора нового режима.')));
+    section.append(button(t('Отключить прежнее расписание'),'ghost',() => {
+      device.schedule.mode = 'manual';
+      save(t('Расписание сохранено.'));
+      render();
+    }));
+  }
   section.append(node('p','field-note',t('Повторное нажатие отключает режим. Автоматика работает, пока панель открыта.')));
   return section;
 }
-function roomHumidity(device) {
-  const source = roomDevices(device.roomId).find(item => !item.transport && item.online &&
-    item.capabilities.some(capability => capability.id === 'humidity' && capability.type === 'sensor') &&
-    Number.isFinite(item.state.humidity));
-  return source?.state.humidity;
-}
-function runHumidifierSchedules(now) {
-  let powerChanged = false;
-  let scheduleChanged = false;
-  for (const device of data.devices) {
-    const schedule = device.schedule;
-    if (device.transport || !device.online || device.kind !== 'humidifier' || !schedule) continue;
-    let power;
-    if (schedule.mode === 'auto') {
-      const humidity = roomHumidity(device);
-      if (humidity !== undefined) power = humidity < (schedule.threshold ?? device.state.target_humidity ?? 50);
-    } else if (schedule.mode === 'interval' && now >= schedule.nextRun) {
-      const period = (schedule.period ?? 60)*60000;
-      schedule.nextRun += (Math.floor((now - schedule.nextRun)/period) + 1)*period;
-      scheduleChanged = true;
-      power = true;
-    }
-    if (power !== undefined && power !== device.state.power) {
-      device.state.power = power;
-      powerChanged = true;
-    }
-  }
-  if (powerChanged || scheduleChanged) save();
-  if (powerChanged && !dialog.open) render();
-  return powerChanged && !dialog.open;
-}
-function dailyScheduleControls(device) {
-  const section = node('section','control');
-  section.append(node('h3','',t('Расписание')));
-  for (const [key,label] of [['on',t('Включать в')],['off',t('Выключать в')]]) {
-    const row = node('div','schedule-row');
-    const input = node('input');
-    input.type = 'time';
-    input.id = 'schedule-' + key;
-    input.value = device.schedule?.[key] ?? '';
-    const caption = node('label','',label);
-    caption.htmlFor = input.id;
-    function update() {
-      device.schedule ??= {};
-      device.schedule[key] = input.value;
-      save(t('Расписание сохранено.'));
-    }
-    input.addEventListener('change',update);
-    row.append(caption,input,button(t('Очистить'),'ghost',() => {
-      input.value = '';
-      update();
-    }));
-    section.append(row);
-  }
-  section.append(node('p','field-note',t('Срабатывает ежедневно по местному времени, пока панель открыта.')));
-  return section;
+function roomMeasurement(device,metric) {
+  const now = Date.now();
+  const source = roomDevices(device.roomId).find(item => item.online &&
+    Boolean(item.transport) === Boolean(device.transport) &&
+    item.capabilities.some(capability => capability.id === metric && capability.type === 'sensor') &&
+    item.state[metric] >= 0 && item.state[metric] <= 100 && Number.isFinite(item.state[metric]) &&
+    (!item.transport || now - (measuredAt.get(item.id) ?? 0) <= konturAutomation.freshnessMs));
+  if (!source) return undefined;
+  return source.transport ? {value:source.state[metric],updatedAt:measuredAt.get(source.id)} : source.state[metric];
 }
 let lastMinute;
 function runSchedules() {
-  const now = new Date();
-  runHumidifierSchedules(now.getTime());
-  const minute = Math.floor(now.getTime()/60000);
-  if (minute === lastMinute) return;
-  lastMinute = minute;
-  const time = [now.getHours(),now.getMinutes()].map(value => String(value).padStart(2,'0')).join(':');
+  const now = Date.now();
   let changed = false;
+  let stateChanged = false;
   for (const device of data.devices) {
-    if (device.transport || !device.online || !device.schedule || device.schedule.mode) continue;
-    const power = device.schedule.off === time ? false : device.schedule.on === time ? true : undefined;
-    if (power !== undefined && device.state.power !== power) {
-      device.state.power = power;
+    if (busyDevices.has(device.id)) continue;
+    const metric = konturAutomation.autoMetric(device);
+    const measurements = metric ? {[metric]:roomMeasurement(device,metric)} : {};
+    const {power,nextRun} = konturAutomation.evaluate(device,device.schedule,measurements,now,lastMinute);
+    if (power !== undefined && device.transport) {
+      const session = deviceSession(device);
+      if (!session || now < (automationRetryAt.get(device.id) ?? 0)) continue;
+      automationRetryAt.set(device.id,now + 5000);
+      const schedule = device.schedule;
+      const deadline = schedule.nextRun;
+      transmit(device,'power',power,true).then(confirmed => {
+        if (confirmed && nextRun !== undefined && device.schedule === schedule && schedule.mode === 'interval' && schedule.nextRun === deadline) {
+          schedule.nextRun = nextRun;
+          save();
+        }
+      });
+      continue;
+    }
+    if (nextRun !== undefined) {
+      device.schedule.nextRun = nextRun;
       changed = true;
     }
+    if (power !== undefined) {
+      device.state.power = power;
+      stateChanged = true;
+    }
   }
-  if (changed) {
-    save();
-    if (!dialog.open) render();
-  }
+  lastMinute = Math.floor(now/60000);
+  if (changed || stateChanged) save();
+  if (stateChanged && !dialog.open && byId('schedule-value') !== document.activeElement) render();
 }
 function parseManifest(raw) {
   let manifest;
@@ -786,29 +794,35 @@ function parseManifest(raw) {
   }
   return manifest.capabilities;
 }
+function deviceSession(device) {
+  return (device.transport === 'lan' ? lanSessions : bleSessions).get(device.id);
+}
 function applyTelemetry(device,session,state) {
-  if (bleSessions.get(device.id) !== session) return;
+  if (deviceSession(device) !== session || !state || typeof state !== 'object') return;
+  measuredAt.set(device.id,Date.now());
   const changed = Object.entries(state).some(([key,value]) => device.state[key] !== value);
   if (!changed) return;
   Object.assign(device.state,state);
   save();
-  if (!dialog.open && !busyBle.has(device.id) && byId('schedule-value') !== document.activeElement) render();
+  if (!dialog.open && !busyDevices.has(device.id) && byId('schedule-value') !== document.activeElement) render();
   notifyWarnings();
 }
-async function transmit(device,capability,value) {
-  const session = bleSessions.get(device.id);
-  if (!session || busyBle.has(device.id)) return;
-  busyBle.add(device.id);
+async function transmit(device,capability,value,automatic=false) {
+  const session = deviceSession(device);
+  if (!session || busyDevices.has(device.id)) return;
+  busyDevices.add(device.id);
   render();
   try {
     const state = await session.send(capability,value);
     applyTelemetry(device,session,state);
-    status(t('Плата подтвердила команду.'));
+    if (!automatic && deviceSession(device) === session) status(t('Плата подтвердила команду.'));
+    return deviceSession(device) === session;
   } catch {
-    status(t('Плата не подтвердила команду.'));
+    if (!automatic) status(t('Плата не подтвердила команду.'));
+    return false;
   } finally {
-    busyBle.delete(device.id);
-    if (!dialog.open) render();
+    busyDevices.delete(device.id);
+    if (!dialog.open && byId('schedule-value') !== document.activeElement) render();
   }
 }
 async function connectHumidifier(room,back,feedback,search,expectedId) {
@@ -846,13 +860,14 @@ async function connectHumidifier(room,back,feedback,search,expectedId) {
     if (connection.state) {
       const oldSession = bleSessions.get(id);
       bleSessions.set(id,connection);
+      measuredAt.set(id,Date.now());
       oldSession?.disconnect();
       connection.subscribe(state => applyTelemetry(device,connection,state),() => {
         if (bleSessions.get(id) !== connection) return;
         bleSessions.delete(id);
         device.online = false;
         save();
-        if (!dialog.open) render();
+        if (!dialog.open && byId('schedule-value') !== document.activeElement) render();
       });
     }
     const message = connection.state ? t('Подключён по Bluetooth') : t('BLE проверен');
@@ -876,10 +891,41 @@ const pairing = {
   climate:'Удерживай кнопку сопряжения 3 секунды.',
   light:'Удерживай кнопку питания 5 секунд, пока лампа не мигнёт.',
   relay:'Удерживай кнопку SET 5 секунд, пока светодиод не начнёт мигать.',
+  feeder:'Подключи ESP32 к домашней сети Wi-Fi.',
   other:'Переведи прибор в режим подключения по его инструкции.'
 };
 function addDevice(room,back) {
   const content = modal(t('Подключение прибора'));
+  const lanResults = node('div','device-links');
+  lanResults.setAttribute('aria-live','polite');
+  const rescan = button(t('Обновить список'),'ghost',scanLan);
+  async function scanLan() {
+    rescan.disabled = true;
+    lanResults.replaceChildren(node('p','muted',t('Поиск приборов в сети…')));
+    try {
+      const items = await konturLan.discover();
+      const ids = new Set(data.devices.filter(device => device.online).map(device => device.id));
+      const candidates = items.filter(item => !ids.has('lan-' + item.id) &&
+        !data.devices.some(device => device.id === 'ble-' + item.id || device.id === 'lan-' + item.id && (item.legacy || device.roomId !== room.id)));
+      lanResults.replaceChildren(...candidates.map(item => {
+        const kind = kinds[Object.hasOwn(kinds,item.kind) ? item.kind : 'other'];
+        const title = item.legacy ? t(kind.label) : item.name;
+        return tile(title,item.legacy ? t('Только обнаружение') : t(kind.label),kind.icon,kind.tone,() => pairLan(room,item));
+      }));
+      if (!candidates.length) lanResults.append(node('p','muted',t('Новых приборов в сети пока нет.')));
+    } catch {
+      if (!konturLan.available()) {
+        const link = node('a','ghost',t('Открыть локальную панель'));
+        link.href = 'http://127.0.0.1:8080/';
+        link.target = '_blank';
+        link.rel = 'noopener';
+        lanResults.replaceChildren(node('p','sub',t('Запусти локальный сервис на компьютере в той же сети.')),link);
+      } else lanResults.replaceChildren(node('p','muted',t('Поиск по Wi-Fi недоступен. Повтори попытку.')));
+
+    } finally {
+      rescan.disabled = false;
+    }
+  }
   const models = node('select');
   models.setAttribute('aria-label',t('Тип прибора'));
   for (const [id,kind] of Object.entries(kinds)) {
@@ -905,7 +951,7 @@ function addDevice(room,back) {
   actions.append(button(t('Вручную'),'ghost',() => addDeviceManually(room,back)),button(t('Сымитировать сигнал'),'primary',() => {
     const type = models.value;
     const kind = kinds[type];
-    const template = data.devices.find(item => item.kind === type);
+    const template = data.devices.find(item => item.kind === type && !item.transport);
     found.replaceChildren(tile(t(kind.label),t('Демоустройство обнаружено'),kind.icon,kind.tone,() => {
       const capabilities = template?.capabilities ?? [power];
       const state = {...(template?.state ?? {power:false})};
@@ -914,8 +960,88 @@ function addDevice(room,back) {
       complete(t('Прибор подключён к комнате «{name}».',{name:roomName(room)}),back);
     }));
   }),button(t('Закрыть'),'ghost',() => dialog.close()));
-  content.append(models,hint,search,feedback,found,actions);
-  models.focus();
+  content.append(sectionHead(t('Устройства в сети'),rescan),lanResults,
+    sectionHead(t('Другие способы подключения')),models,hint,search,feedback,found,actions);
+  rescan.focus();
+  scanLan();
+}
+function pairLan(room,item) {
+  const id = 'lan-' + item.id;
+  if (item.legacy) {
+    if (data.devices.some(device => device.id === id)) return;
+    const kind = Object.hasOwn(kinds,item.kind) ? item.kind : 'other';
+    data.devices.push({id,name:kinds[kind].label,nameIsDefault:true,kind,roomId:room.id,
+      transport:'lan',online:false,capabilities:[],state:{}});
+    complete(t('Прибор добавлен к комнате без управления.'));
+    return;
+  }
+  const {form,error} = formModal(t('Подключить по Wi-Fi'),t('Подключить'));
+  const token = node('input');
+  token.type = 'password';
+  token.autocomplete = 'off';
+  token.maxLength = 128;
+  token.required = item.requiresToken !== false;
+  form.prepend(node('p','sub',item.name));
+  if (token.required) field(form,error,t('Код прибора'),'lan-code',token);
+  const submit = form.querySelector('[type=submit]');
+  form.addEventListener('submit',async event => {
+    event.preventDefault();
+    submit.disabled = true;
+    error.hidden = true;
+    try {
+      const session = await konturLan.pair(item.id,token.value.trim());
+      if (!dialog.open || !form.isConnected) return;
+      const manifest = session.manifest;
+      let device = data.devices.find(entry => entry.id === id);
+      if (device && device.roomId !== room.id) throw Error('device-unavailable');
+      if (!device) {
+        device = {id,roomId:room.id,transport:'lan',nameIsDefault:false};
+        data.devices.push(device);
+      }
+      Object.assign(device,{
+        name:manifest.name,kind:Object.hasOwn(kinds,manifest.kind) ? manifest.kind : 'other',
+        capabilities:manifest.capabilities,state:session.state,online:true
+      });
+      lanSessions.set(id,session);
+      measuredAt.set(id,Date.now());
+      complete(t('Прибор подключён к комнате «{name}».',{name:roomName(room)}));
+      notifyWarnings();
+    } catch (failure) {
+      showError(error,t(failure.message === 'device-token' ? 'Код прибора не подошёл.' : 'Не удалось подключиться по Wi-Fi.'));
+    } finally {
+      submit.disabled = false;
+    }
+  });
+  (token.required ? token : submit).focus();
+}
+let refreshingLan = false;
+async function pollLan() {
+  if (refreshingLan || !lanSessions.size) return;
+  refreshingLan = true;
+  try {
+    await Promise.all(data.devices.filter(device => lanSessions.has(device.id) && !busyDevices.has(device.id)).map(async device => {
+      const session = lanSessions.get(device.id);
+      try {
+        const state = await session.read();
+        if (!busyDevices.has(device.id) && lanSessions.get(device.id) === session) {
+          const reconnected = !device.online;
+          device.online = true;
+          applyTelemetry(device,session,state);
+          if (reconnected && !dialog.open) render();
+        }
+      } catch {
+        if (lanSessions.get(device.id) !== session) return;
+        if (device.online) {
+          device.online = false;
+          measuredAt.delete(device.id);
+          save();
+          if (!dialog.open && byId('schedule-value') !== document.activeElement) render();
+        }
+      }
+    }));
+  } finally {
+    refreshingLan = false;
+  }
 }
 function addDeviceManually(room,back) {
   const {form,error} = formModal(t('Добавить прибор'),t('Добавить'),back);
@@ -987,3 +1113,4 @@ syncRoute();
 runSchedules();
 notifyWarnings();
 setInterval(runSchedules,1000);
+setInterval(pollLan,5000);

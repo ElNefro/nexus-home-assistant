@@ -106,3 +106,35 @@ test('all scripts parse and the PWA shell references real files',() => {
     assert.equal(image.readUInt32BE(16) + 'x' + image.readUInt32BE(20),icon.sizes);
   }
 });
+test('Wi-Fi discovery uses the device manifest and pairing keeps the chosen identity',async () => {
+  const manifest = {
+    schemaVersion:1,id:'light-0123456789ab',name:'Workshop light',kind:'light',
+    capabilities:[{id:'dimmer',label:'Dimmer',type:'slider',min:0,max:100,step:1}]
+  };
+  const replies = [
+    {devices:[manifest,{...manifest,id:'broken light'}]},
+    {session:'opaque',manifest,state:{dimmer:50}},
+    {state:{dimmer:70}}
+  ];
+  const calls = [];
+  const browser = vm.createContext({
+    AbortSignal,konturStorage:storage,location:{origin:'http://127.0.0.1:8080'},
+    async fetch(path,options) {
+      calls.push([path,options.body && JSON.parse(options.body)]);
+      return {ok:true,json:async () => replies.shift()};
+    }
+  });
+  vm.runInContext(fs.readFileSync('public/lan.js','utf8'),browser);
+  const devices = await browser.konturLan.discover();
+  assert.equal(devices.length,1);
+  assert.equal(devices[0].capabilities[0].id,'dimmer');
+  const session = await browser.konturLan.pair(devices[0].id,'test-code');
+  assert.deepEqual(await session.send('dimmer',70),{dimmer:70});
+  assert.deepEqual(calls,[
+    ['./api/discovery',undefined],
+    ['./api/pair',{id:manifest.id,token:'test-code'}],
+    ['./api/command',{session:'opaque',capability:'dimmer',value:70}]
+  ]);
+  browser.location.origin = 'https://nexus-home-assistant.onrender.com';
+  await assert.rejects(browser.konturLan.discover(),/local-service/);
+});
