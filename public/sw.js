@@ -1,10 +1,10 @@
 'use strict';
 
-const cacheName = 'kontur-shell-1.3.1';
+const cacheName = 'kontur-shell-1.5.1';
 const shell = [
-  './','./index.html','./offline.html','./styles.css?v=1.3.1','./app.js?v=1.3.1','./i18n.js',
-  './storage.js?v=1.3.1','./ble.js?v=1.3.1','./platform.js?v=1.3.1','./manifest.webmanifest',
-  './icons/kontur-192.png','./icons/kontur-512.png','./automation.js?v=1.3.1','./lan.js?v=1.3.1','./images/room-dome.png'
+  './','./index.html','./offline.html','./styles.css?v=1.5.1','./app.js?v=1.5.1','./i18n.js?v=1.5.1','./home-api.js?v=1.5.1','./room-scene.js?v=1.5.1','./shared-home.js?v=1.5.1',
+  './storage.js?v=1.5.1','./platform.js?v=1.5.1','./manifest.webmanifest',
+  './icons/kontur-192.png','./icons/kontur-512.png','./automation.js?v=1.5.1','./lan.js?v=1.5.1','./images/room-dome.png'
 ];
 const shellUrls = new Set(shell.map(path => new URL(path,self.registration.scope).href));
 
@@ -32,14 +32,28 @@ self.addEventListener('fetch',event => {
   })());
 });
 
+self.addEventListener('push',event => {
+  let payload;
+  try { payload = event.data?.json(); } catch { return; }
+  if (!payload || typeof payload.title !== 'string') return;
+  event.waitUntil(self.registration.showNotification(payload.title,{
+    body:payload.body,tag:payload.tag,icon:'./icons/kontur-192.png',
+    data:{deviceId:payload.deviceId,homeId:payload.homeId}
+  }));
+});
+
 self.addEventListener('notificationclick',event => {
   event.notification.close();
   event.waitUntil((async () => {
     const destination = new URL('./',self.registration.scope);
     const deviceId = event.notification.data?.deviceId;
+    const route = new URLSearchParams({page:typeof deviceId === 'string' ? 'devices' : 'home'});
     if (typeof deviceId === 'string') {
-      destination.hash = new URLSearchParams({page:'devices',type:'device',id:deviceId}).toString();
+      route.set('type','device');
+      route.set('id',deviceId);
     }
+    if (typeof event.notification.data?.homeId === 'string') route.set('homeId',event.notification.data.homeId);
+    destination.hash = route.toString();
     for (const client of await self.clients.matchAll({type:'window',includeUncontrolled:true})) {
       if (client.url.split('#')[0] !== destination.href.split('#')[0]) continue;
       await client.navigate(destination.href);

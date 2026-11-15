@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const storage = require('../public/storage.js');
-const ble = require('../public/ble.js');
+const ble = require('./support/ble.js');
 
 function home() {
   return {

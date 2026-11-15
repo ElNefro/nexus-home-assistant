@@ -46,7 +46,7 @@
     return true;
   }
 
-  function normalize(input) {
+  function normalize(input,{trustedLive=false}={}) {
     if (!object(input) || !Array.isArray(input.rooms) || !input.rooms.length ||
         !Array.isArray(input.devices) || !object(input.profile) || !text(input.profile.name,60) ||
         !uniqueItems(input.rooms, item => object(item) && text(item.id,128) && text(item.name,60))) {
@@ -74,7 +74,8 @@
         return {
           id:device.id, name:device.name, roomId:device.roomId,
           kind:kinds.includes(device.kind) ? device.kind : 'other',
-          online:!transport && device.online === true,
+          online:(!transport || trustedLive) && device.online === true,
+          lastSeen:trustedLive && Number.isSafeInteger(device.lastSeen) ? device.lastSeen : undefined,
           transport, state, schedule:cleanSchedule(device.schedule),
           nameIsDefault:device.nameIsDefault === true,
           capabilities:device.capabilities,

@@ -3,22 +3,28 @@ import http.client
 import ipaddress
 import json
 import math
+import logging
+import os
 import re
 import secrets
 import time
 from concurrent.futures import ThreadPoolExecutor
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from threading import Lock
+from threading import Event, Lock, Thread
 from urllib.parse import urlsplit
 
 from zeroconf import IPVersion, ServiceBrowser, ServiceListener, Zeroconf
+
+from server_accounts import Accounts, AccountError
+from server_automation import decision
 
 
 SERVICE = "_kontur._tcp.local."
 PUBLIC = Path(__file__).resolve().parent / "public"
 HOST = "127.0.0.1:8080"
 ORIGIN = f"http://{HOST}"
+LOCAL_HOSTS = {HOST, "localhost:8080"}
 DEVICE_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 CAPABILITY_ID = re.compile(r"[a-z][a-z0-9_-]{0,39}")
 LOCAL_NETWORKS = tuple(map(ipaddress.IPv4Network, (
@@ -201,6 +207,10 @@ class Registry:
             self.sessions[session_id] = (manifest, address, token, Lock(), time.monotonic())
         return {"session": session_id, "manifest": manifest, "state": state}
 
+    def device_id_for_session(self, session_id):
+        with self.lock:
+            return "lan-" + self.sessions[session_id][0]["id"]
+
     def session(self, session_id, command=None):
         with self.lock:
             manifest, address, token, request_lock, last_seen = self.sessions[session_id]
@@ -220,6 +230,90 @@ class Registry:
 REGISTRY = Registry()
 
 
+class SharedDevices:
+    def __init__(self, accounts, push):
+        self.accounts = accounts
+        self.push = push
+        self.links = {}
+        self.lock = Lock()
+
+    def add(self, home_id, room_id, pair):
+        device = self.accounts.bind_device(home_id, pair["manifest"], room_id, pair["state"])
+        with self.lock:
+            self.links[(home_id, device["id"])] = pair["session"]
+
+    def linked(self, home_id, device_id):
+        with self.lock:
+            session = self.links.get((home_id, device_id))
+        return session if session and self.accounts.has_device(home_id, device_id) else None
+
+    def read(self, home_id, device_id, session, command=None):
+        state = REGISTRY.session(session, command)["state"]
+        self.accounts.update_device_state(home_id, device_id, state, True)
+        if command is not None and state.get(command["capability"]) != command["value"]:
+            raise AccountError(502, "device-unconfirmed")
+        return state
+
+    def tick(self, previous_minute):
+        now = int(time.time() * 1000)
+        for home in self.accounts.iter_homes():
+            devices = home["state"]["devices"]
+            revision = home["revision"]
+            for device in devices:
+                device_id = device["id"]
+                power, next_run = decision(device, devices, now, previous_minute)
+                if power is None and next_run is None:
+                    continue
+                if device.get("transport"):
+                    session = self.linked(home["id"], device_id)
+                    if not session:
+                        continue
+                    if power is not None:
+                        try:
+                            # Re-read next tick so a failed command does not consume the interval.
+                            self.read(home["id"], device_id, session, {"capability":"power","value":power})
+                        except (OSError, KeyError, ValueError, AccountError, http.client.HTTPException):
+                            continue
+                        break
+                if self.accounts.apply_automation(home["id"], device_id, revision, power, next_run):
+                    revision += 1
+        return now // 60_000
+
+    def poll(self):
+        with self.lock:
+            links = list(self.links.items())
+        for (home_id, device_id), session in links:
+            if not self.accounts.has_device(home_id,device_id):
+                with self.lock:
+                    if self.links.get((home_id, device_id)) == session:
+                        self.links.pop((home_id, device_id), None)
+                continue
+            try:
+                self.read(home_id, device_id, session)
+            except (OSError, KeyError, ValueError, AccountError, http.client.HTTPException):
+                try:
+                    self.accounts.update_device_state(home_id, device_id, {}, False)
+                except AccountError:
+                    pass
+        if self.push:
+            for home in self.accounts.iter_homes():
+                for device in home["state"]["devices"]:
+                    self.push.observe(home["id"],device)
+
+    def run(self, stopped):
+        previous_minute = None
+        next_poll = 0
+        while not stopped.wait(1):
+            try:
+                previous_minute = self.tick(previous_minute)
+                if time.monotonic() >= next_poll:
+                    self.poll()
+                    next_poll = time.monotonic() + 4
+            except Exception:
+                logging.exception("Local home worker")
+
+
+
 class Handler(SimpleHTTPRequestHandler):
     extensions_map = {**SimpleHTTPRequestHandler.extensions_map, ".webmanifest": "application/manifest+json"}
 
@@ -227,18 +321,35 @@ class Handler(SimpleHTTPRequestHandler):
         super().__init__(*args, directory=str(PUBLIC), **kwargs)
 
     def guarded(self):
-        return self.headers.get("Host") == HOST and self.headers.get("Origin") in (None, ORIGIN) and (
+        host = self.headers.get("Host")
+        return host in LOCAL_HOSTS and self.headers.get("Origin") in (None, f"http://{host}") and (
             self.headers.get("Sec-Fetch-Site") in (None, "none", "same-origin")
         )
 
-    def reply(self, code, payload):
+    def reply(self, code, payload, headers=None):
         body = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
+        for name, value in (headers or {}).items():
+            self.send_header(name,value)
         self.end_headers()
         self.wfile.write(body)
+
+    def shared_route(self, method, path, value=None):
+        cookie = self.headers.get("Cookie")
+        if self.server.push:
+            result = self.server.push.route(method,path,value,cookie)
+            if result is not None:
+                return result
+        result = self.server.accounts.route(method,path,value,cookie)
+        if self.server.push and path == "/api/home/revoke" and result and result[0] == 200:
+            self.server.push.after_revoke(value["userId"],value["homeId"])
+        return result
+
+    def get_home(self, value):
+        return self.server.accounts.route("POST", "/api/home/get", {"homeId":value["homeId"]}, self.headers.get("Cookie"))
 
     def do_GET(self):
         if not self.guarded():
@@ -246,6 +357,9 @@ class Handler(SimpleHTTPRequestHandler):
         path = urlsplit(self.path).path
         if not path.startswith("/api/"):
             return super().do_GET()
+        handled = self.shared_route("GET",path)
+        if handled is not None:
+            return self.reply(*handled)
         if path != "/api/discovery":
             return self.reply(404, {"error": "not-found"})
         try:
@@ -254,32 +368,56 @@ class Handler(SimpleHTTPRequestHandler):
             return self.reply(503, {"error": "discovery-unavailable"})
 
     def do_POST(self):
-        if (not self.guarded() or self.headers.get("Origin") != ORIGIN
+        if (not self.guarded() or self.headers.get("Origin") != f'http://{self.headers.get("Host")}'
                 or self.headers.get_content_type() != "application/json"):
             return self.reply(403, {"error": "wrong-origin"})
         try:
+            path = urlsplit(self.path).path
+            limit = 2_000_000 if path in ("/api/home/create", "/api/home/save") else 4096
             length = int(self.headers.get("Content-Length", "0"))
-            if not 0 < length <= 4096:
+            if not 0 < length <= limit:
                 raise ValueError("body")
             value = json.loads(self.rfile.read(length))
             if not isinstance(value, dict):
                 raise ValueError("body")
-            path = urlsplit(self.path).path
+            if path == "/api/home/command" and isinstance(value.get("id"), str) and value["id"].startswith("lan-"):
+                home_id, device_id = value.get("homeId"),value["id"]
+                self.server.accounts.authorize(self.headers.get("Cookie"),home_id)
+                session = self.server.shared_devices.linked(home_id,device_id)
+                if not session:
+                    raise AccountError(409,"device-offline")
+                self.server.shared_devices.read(home_id,device_id,session,{key:value.get(key) for key in ("capability","value")})
+                return self.reply(*self.get_home(value))
+            handled = self.shared_route("POST",path,value)
+            if handled is not None:
+                return self.reply(*handled)
             if path == "/api/pair":
                 device_id, token = value.get("id"), value.get("token", "")
                 if (not isinstance(device_id, str) or not DEVICE_ID.fullmatch(device_id)
                         or not isinstance(token, str) or not re.fullmatch(r"[!-~]{0,128}", token)):
                     raise ValueError("pair")
+                if "homeId" in value:
+                    home_id = value["homeId"]
+                    self.server.accounts.authorize(self.headers.get("Cookie"),home_id,owner=True)
+                    self.server.shared_devices.add(home_id,value.get("roomId"),REGISTRY.pair(device_id, token))
+                    return self.reply(*self.get_home(value))
+                if self.server.accounts.lan_owner("lan-" + device_id):
+                    raise AccountError(409, "device-owned")
                 return self.reply(200, REGISTRY.pair(device_id, token))
             if path in ("/api/state", "/api/command"):
                 session_id = value.get("session")
                 if not isinstance(session_id, str):
                     raise KeyError("session")
+                if self.server.accounts.lan_owner(REGISTRY.device_id_for_session(session_id)):
+                    raise AccountError(409, "device-owned")
                 command = {key: value.get(key) for key in ("capability", "value")} if path == "/api/command" else None
                 return self.reply(200, REGISTRY.session(session_id, command))
             return self.reply(404, {"error": "not-found"})
-        except PermissionError:
-            return self.reply(401, {"error": "device-token"})
+        except AccountError as error:
+            return self.reply(error.status, {"error":error.code})
+        except PermissionError as error:
+            code = str(error)
+            return self.reply(401 if code == "device-token" else 503, {"error":"device-token" if code == "device-token" else "device-unavailable"})
         except KeyError:
             return self.reply(404, {"error": "device-unavailable"})
         except (ValueError, TypeError):
@@ -288,7 +426,28 @@ class Handler(SimpleHTTPRequestHandler):
             return self.reply(503, {"error": "device-unavailable"})
 
 
-if __name__ == "__main__":
+def run():
+    root = Path(__file__).resolve().parent
+    database = Path(os.getenv("KONTUR_DB", str(root / ".local-work" / "kontur-preview.sqlite3")))
+    database.parent.mkdir(parents=True, exist_ok=True)
+    stopped = Event()
     with ThreadingHTTPServer(("127.0.0.1", 8080), Handler) as server:
-        print(f"Kontur: {ORIGIN}", flush=True)
-        server.serve_forever()
+        server.accounts = Accounts(database)
+        server.accounts.mark_lan_offline()
+        try:
+            from shared_push_routes import PushRoutes
+            server.push = PushRoutes(database.with_name(database.stem + "-push.sqlite3"),server.accounts)
+        except ImportError:
+            server.push = None
+        server.shared_devices = SharedDevices(server.accounts,server.push)
+        worker = Thread(target=server.shared_devices.run,args=(stopped,),daemon=True)
+        worker.start()
+        print("Kontur: http://localhost:8080 (http://127.0.0.1:8080 for existing local data)", flush=True)
+        try:
+            server.serve_forever()
+        finally:
+            stopped.set()
+
+
+if __name__ == "__main__":
+    run()

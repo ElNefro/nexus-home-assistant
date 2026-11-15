@@ -4,10 +4,19 @@
 #include <WebServer.h>
 #include <WiFi.h>
 #include <cstdio>
+#include <driver/gpio.h>
 
 #include "secrets.h"
 
+#ifndef KONTUR_LED_GPIO
+#define KONTUR_LED_GPIO -1
+#endif
+
 namespace {
+constexpr int kLedGpio = KONTUR_LED_GPIO;
+constexpr uint32_t kLedFrequency = 5000;
+constexpr uint8_t kLedResolution = 8;
+constexpr uint32_t kLedMaxDuty = (1u << kLedResolution) - 1;
 constexpr uint16_t kHttpPort = 80;
 constexpr uint32_t kMdnsRetryMs = 5000;
 constexpr size_t kMaxCommandBytes = 256;
@@ -15,6 +24,7 @@ constexpr char kJson[] = "application/json; charset=utf-8";
 constexpr char kManifestPath[] = "/kontur/v1/manifest";
 constexpr char kStatePath[] = "/kontur/v1/state";
 constexpr char kCommandPath[] = "/kontur/v1/command";
+constexpr char kDeviceName[] = "Светильник ESP32";
 constexpr char kCapabilityManifest[] = R"json([
   {"id":"power","type":"switch","label":"Питание"},
   {"id":"brightness","type":"slider","label":"Яркость","min":0,"max":100,"step":1,"unit":"%"}
@@ -23,10 +33,15 @@ WebServer server(kHttpPort);
 char deviceId[sizeof("light-000000000000")];
 bool power = false;
 int brightness = 50;
+bool ledReady = false;
 bool httpStarted = false;
 bool mdnsStarted = false;
 bool configurationValid = false;
 uint32_t mdnsAttemptedAt = 0;
+
+bool validLedPin(int pin) {
+  return pin >= 0 && pin < GPIO_NUM_MAX && GPIO_IS_VALID_OUTPUT_GPIO(pin);
+}
 
 bool tokenConfigured() {
   const String token(kDeviceToken);
@@ -58,6 +73,28 @@ void sendJson(int status, const String& body) {
   server.send(status, kJson, body);
 }
 
+void holdLedLow() {
+  // Set the output latch before enabling the output driver.
+  gpio_set_level(static_cast<gpio_num_t>(kLedGpio), 0);
+  pinMode(kLedGpio, OUTPUT);
+}
+
+bool setLight(bool enabled, int percent) {
+  if (!ledReady) return false;
+  const uint32_t duty = enabled ? (percent * kLedMaxDuty + 50u) / 100u : 0u;
+  if (!ledcWrite(kLedGpio, duty)) {
+    ledcDetach(kLedGpio);
+    holdLedLow();
+    ledReady = false;
+    power = false;
+    Serial.println("LED PWM failed. Output disabled until restart.");
+    return false;
+  }
+  power = enabled;
+  brightness = percent;
+  return true;
+}
+
 void sendState() {
   char body[64];
   std::snprintf(body, sizeof(body), "{\"power\":%s,\"brightness\":%d}", power ? "true" : "false", brightness);
@@ -75,7 +112,9 @@ void handleState() {
 void sendManifest() {
   String body = "{\"schemaVersion\":1,\"id\":\"";
   body += deviceId;
-  body += "\",\"name\":\"Светильник ESP32\",\"kind\":\"light\",\"requiresToken\":true,\"capabilities\":";
+  body += "\",\"name\":\"";
+  body += kDeviceName;
+  body += "\",\"kind\":\"light\",\"requiresToken\":true,\"capabilities\":";
   body += kCapabilityManifest;
   body += '}';
   sendJson(200, body);
@@ -112,13 +151,19 @@ void handleCommand() {
   }
 
   const JsonVariantConst value = command["value"];
+  bool nextPower = power;
+  int nextBrightness = brightness;
   if (command["capability"] == "power" && value.is<bool>()) {
-    power = value.as<bool>();
+    nextPower = value.as<bool>();
   } else if (command["capability"] == "brightness" && value.is<int>() &&
              value.as<int>() >= 0 && value.as<int>() <= 100) {
-    brightness = value.as<int>();
+    nextBrightness = value.as<int>();
   } else {
     sendJson(400, "{\"error\":\"invalid-capability-or-value\"}");
+    return;
+  }
+  if (!setLight(nextPower, nextBrightness)) {
+    sendJson(503, "{\"error\":\"led-output-unavailable\"}");
     return;
   }
   Serial.printf("Light state: power=%s, brightness=%d\n", power ? "on" : "off", brightness);
@@ -138,6 +183,8 @@ void startMdns() {
     return;
   }
   MDNS.addServiceTxt("kontur", "tcp", "version", "1");
+  MDNS.addServiceTxt("kontur", "tcp", "id", deviceId);
+  MDNS.addServiceTxt("kontur", "tcp", "kind", "light");
   mdnsStarted = true;
   Serial.printf("Announcing %s.local via _kontur._tcp\n", deviceId);
 }
@@ -151,6 +198,7 @@ void maintainNetwork() {
     if (httpStarted) {
       server.stop();
       httpStarted = false;
+      setLight(false, brightness);
       Serial.println("Wi-Fi disconnected");
     }
     return;
@@ -171,10 +219,22 @@ void maintainNetwork() {
 
 void setup() {
   Serial.begin(115200);
+  if (!validLedPin(kLedGpio)) {
+    Serial.println("Set KONTUR_LED_GPIO to an available output on your board in secrets.h");
+    return;
+  }
+  holdLedLow();
   if (!kWifiSsid[0] || !tokenConfigured()) {
     Serial.println("Set Wi-Fi SSID and a 32-128 character device token in secrets.h");
     return;
   }
+  ledReady = ledcAttach(kLedGpio, kLedFrequency, kLedResolution);
+  if (!ledReady) {
+    holdLedLow();
+    Serial.println("Unable to initialize LED PWM");
+    return;
+  }
+  if (!setLight(false, brightness)) return;
   std::snprintf(deviceId, sizeof(deviceId), "light-%012llx",
     static_cast<unsigned long long>(ESP.getEfuseMac() & 0xffffffffffffULL));
   const char* headers[] = {"Content-Type"};

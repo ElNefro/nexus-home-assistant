@@ -1,9 +1,9 @@
 'use strict';
 
 (function expose(root) {
-  const origin = 'http://127.0.0.1:8080';
+  const origins = ['http://127.0.0.1:8080','http://localhost:8080'];
   const validId = /^[a-z0-9][a-z0-9_-]{0,63}$/;
-  const available = () => root.location?.origin === origin;
+  const available = () => origins.includes(root.location?.origin);
 
   async function request(route,body) {
     if (!available()) throw new Error('local-service');

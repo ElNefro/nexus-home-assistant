@@ -1,0 +1,140 @@
+import tempfile
+import unittest
+from pathlib import Path
+
+from server_accounts import AccountError, Accounts
+
+
+def sample():
+    return {
+        "rooms": [{"id": "living", "name": "Гостиная"}],
+        "devices": [{
+            "id": "lamp", "kind": "light", "name": "Светильник",
+            "roomId": "living", "online": True, "state": {"power": False},
+            "capabilities": [{"id": "power", "label": "Питание", "type": "switch"}]
+        }],
+        "roomId": "living",
+        "profile": {"name": "Impersonator", "role": "Admin"}
+    }
+
+
+class AccountsTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.file = Path(self.temp.name) / "home.db"
+        self.accounts = Accounts(self.file)
+
+    def request(self, route, body=None, cookie=None):
+        return self.accounts.route("GET" if body is None else "POST", route, body, cookie)
+
+    def register(self, email, name):
+        status, payload, headers = self.request("/api/account/register", {
+            "email": email, "password": "a local test password", "name": name
+        })
+        self.assertEqual(status, 201)
+        self.assertIn("HttpOnly", headers["Set-Cookie"])
+        self.assertIn("SameSite=Strict", headers["Set-Cookie"])
+        return payload, headers["Set-Cookie"].split(";", 1)[0]
+
+    def test_owner_invites_member_and_revocation_stops_shared_commands(self):
+        _, owner = self.register("owner@example.test", "Owner")
+        member, guest = self.register("member@example.test", "Member")
+        status, home, _ = self.request("/api/home/create", {"name":"Home", "state":sample()}, owner)
+        self.assertEqual(status, 200)
+        self.assertEqual(home["state"]["profile"]["name"], "Owner")
+        home_id = home["id"]
+        self.assertEqual(self.request("/api/home/get", {"homeId":home_id}, guest)[0], 403)
+        _, invite, _ = self.request("/api/home/invite", {"homeId":home_id}, owner)
+        status, joined, _ = self.request("/api/home/join", invite, guest)
+        self.assertEqual(status, 200)
+        self.assertEqual(joined["role"], "member")
+        self.assertEqual(self.request("/api/home/join", invite, guest)[0], 404)
+        command = {"homeId":home_id,"id":"lamp","capability":"power","value":True}
+        status, result, _ = self.request("/api/home/command", command, guest)
+        self.assertEqual(status, 200)
+        self.assertTrue(result["state"]["devices"][0]["state"]["power"])
+        self.assertEqual(self.request("/api/home/save", {
+            "homeId":home_id, "state":sample(), "revision":result["revision"]
+        }, guest)[0], 403)
+        self.assertEqual(self.request("/api/home/revoke", {
+            "homeId":home_id, "userId":member["user"]["id"]
+        }, owner)[0], 200)
+        self.assertEqual(self.request("/api/home/command", command, guest)[0], 403)
+        with self.assertRaises(AccountError):
+            self.accounts.authorize(guest,home_id)
+
+    def test_cas_and_restart_keep_state(self):
+        _, owner = self.register("owner@example.test", "Owner")
+        _, home, _ = self.request("/api/home/create", {"name":"Home","state":sample()}, owner)
+        body = {"homeId":home["id"],"state":sample(),"revision":home["revision"]}
+        body["state"]["rooms"][0]["name"] = "Office"
+        self.assertEqual(self.request("/api/home/save", body, owner)[0], 200)
+        self.assertEqual(self.request("/api/home/save", body, owner)[0], 409)
+        self.accounts = Accounts(self.file)
+        status, returned, _ = self.request("/api/home/get", {"homeId":home["id"]}, owner)
+        self.assertEqual(status, 200)
+        self.assertEqual(returned["state"]["rooms"][0]["name"], "Office")
+
+    def test_recovery_rotates_code_and_ends_old_session(self):
+        registered, old_cookie = self.register("owner@example.test", "Owner")
+        body = {"email":"owner@example.test","recoveryCode":registered["recoveryCode"],
+                "password":"a replacement password"}
+        status, recovered, headers = self.request("/api/account/recover", body)
+        self.assertEqual(status, 200)
+        self.assertNotEqual(recovered["recoveryCode"], body["recoveryCode"])
+        self.assertEqual(self.request("/api/account/recover", body)[0], 401)
+        self.assertIsNone(self.request("/api/account/session", cookie=old_cookie)[1]["user"])
+        cookie = headers["Set-Cookie"].split(";",1)[0]
+        self.assertEqual(self.request("/api/account/session", cookie=cookie)[1]["user"]["name"], "Owner")
+
+    def test_automation_rejects_stale_revision(self):
+        _, owner = self.register("owner@example.test", "Owner")
+        _, home, _ = self.request("/api/home/create", {"name":"Home","state":sample()}, owner)
+        body = {"homeId":home["id"],"id":"lamp","schedule":{"mode":"interval","period":30}}
+        _, current, _ = self.request("/api/home/schedule",body,owner)
+        self.assertFalse(self.accounts.apply_automation(home["id"],"lamp",home["revision"],True,500))
+        self.assertTrue(self.accounts.apply_automation(home["id"],"lamp",current["revision"],True,500))
+        state = self.accounts.iter_homes()[0]["state"]["devices"][0]
+        self.assertTrue(state["state"]["power"])
+        self.assertEqual(state["schedule"]["nextRun"], 500)
+
+    def test_lan_binding_is_exclusive_and_preserves_confirmed_state(self):
+        _, owner = self.register("owner@example.test", "Owner")
+        _, another = self.register("other@example.test", "Other")
+        _, home, _ = self.request("/api/home/create", {"name":"Home"}, owner)
+        _, second, _ = self.request("/api/home/create", {"name":"Second"}, another)
+        manifest = {
+            "id":"test-lamp", "name":"Desk lamp", "kind":"light",
+            "capabilities":[{"id":"power","type":"switch","label":"Power"}]
+        }
+        device = self.accounts.bind_device(home["id"],manifest,"living",{"power":False})
+        with self.assertRaises(AccountError) as failure:
+            self.accounts.bind_device(second["id"],manifest,"living",{"power":False})
+        self.assertEqual(failure.exception.code,"device-owned")
+        self.assertTrue(self.accounts.has_device(home["id"],device["id"]))
+        _, current, _ = self.request("/api/home/get",{"homeId":home["id"]},owner)
+        settings = current["state"]["devices"][0]
+        settings["state"]["power"] = True
+        del settings["transport"]
+        status, saved, _ = self.request("/api/home/save",{
+            "homeId":home["id"],"state":current["state"],"revision":current["revision"]
+        },owner)
+        self.assertEqual(status,200)
+        self.assertEqual(saved["state"]["devices"][0]["transport"],"lan")
+        self.assertFalse(saved["state"]["devices"][0]["state"]["power"])
+        self.accounts.update_device_state(home["id"],device["id"],{"power":True},True)
+        self.accounts.mark_lan_offline()
+        _, after_reboot, _ = self.request("/api/home/get",{"homeId":home["id"]},owner)
+        self.assertFalse(after_reboot["state"]["devices"][0]["online"])
+        self.assertTrue(after_reboot["state"]["devices"][0]["state"]["power"])
+        after_reboot["state"]["devices"] = []
+        self.assertEqual(self.request("/api/home/save",{
+            "homeId":home["id"],"state":after_reboot["state"],"revision":after_reboot["revision"]
+        },owner)[0],200)
+        self.assertFalse(self.accounts.has_device(home["id"],device["id"]))
+        self.assertTrue(self.accounts.bind_device(second["id"],manifest,"living",{"power":False})["online"])
+
+
+if __name__ == "__main__":
+    unittest.main()
