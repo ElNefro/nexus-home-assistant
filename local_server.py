@@ -1,4 +1,4 @@
-"""Loopback-only bridge between the Kontur dashboard and DNS-SD devices."""
+"""Loopback-only bridge between the Kontur dashboard and local Wi-Fi devices."""
 import http.client
 import ipaddress
 import json
@@ -7,6 +7,8 @@ import logging
 import os
 import re
 import secrets
+import selectors
+import socket
 import time
 from concurrent.futures import ThreadPoolExecutor
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -14,6 +16,7 @@ from pathlib import Path
 from threading import Event, Lock, Thread
 from urllib.parse import urlsplit
 
+from ifaddr import get_adapters
 from zeroconf import IPVersion, ServiceBrowser, ServiceListener, Zeroconf
 
 from server_accounts import Accounts, AccountError
@@ -21,6 +24,9 @@ from server_automation import decision
 
 
 SERVICE = "_kontur._tcp.local."
+DISCOVERY_PORT = 42424
+DISCOVERY_REQUEST = b"KONTUR-DISCOVER-1 "
+DISCOVERY_RESPONSE = b"KONTUR-HERE-1 "
 PUBLIC = Path(__file__).resolve().parent / "public"
 HOST = "127.0.0.1:8080"
 ORIGIN = f"http://{HOST}"
@@ -150,7 +156,7 @@ def resolve_record(info):
     return None
 
 
-def discover():
+def dns_sd_records():
     listener = Devices()
     with Zeroconf(ip_version=IPVersion.V4Only) as zeroconf:
         browser = ServiceBrowser(zeroconf, SERVICE, listener)
@@ -158,9 +164,78 @@ def discover():
             time.sleep(1.6)
         finally:
             browser.cancel()
-        records = list(listener.records.values())[:20]
+        return list(listener.records.values())[:20]
+
+
+def broadcast_addresses():
+    nonce = secrets.token_hex(12).encode("ascii")
+    targets = set()
+    try:
+        for adapter in get_adapters():
+            for address in adapter.ips:
+                if address.is_IPv4 and 0 < address.network_prefix < 31:
+                    interface = ipaddress.IPv4Interface((address.ip, address.network_prefix))
+                    if any(interface.ip in network for network in LOCAL_NETWORKS):
+                        targets.add(interface)
+    except (OSError, ValueError):
+        pass
+    addresses = set()
+    channels = []
+    with selectors.DefaultSelector() as selector:
+        try:
+            for interface in sorted(targets)[:16]:
+                channel = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                channels.append(channel)
+                try:
+                    channel.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+                    channel.bind((str(interface.ip), 0))
+                    channel.setblocking(False)
+                    channel.sendto(DISCOVERY_REQUEST + nonce, (str(interface.network.broadcast_address), DISCOVERY_PORT))
+                    selector.register(channel, selectors.EVENT_READ, interface)
+                except OSError:
+                    continue
+            if not selector.get_map():
+                return []
+            deadline = time.monotonic() + 1.25
+            while time.monotonic() < deadline and len(addresses) < 20:
+                for key, _ in selector.select(max(0, deadline - time.monotonic())):
+                    try:
+                        payload, (host, port) = key.fileobj.recvfrom(64)
+                    except OSError:
+                        continue
+                    if port != DISCOVERY_PORT or payload != DISCOVERY_RESPONSE + nonce:
+                        continue
+                    ip = ipaddress.IPv4Address(host)
+                    interface = key.data
+                    if (ip in interface.network and ip not in (interface.ip, interface.network.broadcast_address,
+                            interface.network.network_address) and any(ip in network for network in LOCAL_NETWORKS)):
+                        addresses.add((host, 80))
+        finally:
+            for channel in channels:
+                channel.close()
+    return sorted(addresses)[:20]
+
+
+def resolve_broadcast(address):
+    try:
+        return normalize_manifest(device_request(address, "manifest")), address
+    except (OSError, ValueError, http.client.HTTPException):
+        return None
+
+
+def discover():
     with ThreadPoolExecutor(max_workers=10) as pool:
-        return [entry for entry in pool.map(resolve_record, records) if entry]
+        broadcast = pool.submit(broadcast_addresses)
+        try:
+            records = dns_sd_records()
+        except OSError:
+            records = []
+        try:
+            addresses = broadcast.result()
+        except OSError:
+            addresses = []
+        found = [*pool.map(resolve_record, records), *pool.map(resolve_broadcast, addresses)]
+        return [entry for entry in found if entry]
 
 
 class Registry:
