@@ -1,10 +1,10 @@
 'use strict';
 
-const cacheName = 'kontur-shell-1.6.0';
+const cacheName = 'kontur-shell-1.6.1';
 const shell = [
-  './','./index.html','./offline.html','./styles.css?v=1.6.0','./app.js?v=1.6.0','./i18n.js?v=1.6.0','./home-api.js?v=1.6.0','./room-scene.js?v=1.6.0','./shared-home.js?v=1.6.0',
-  './storage.js?v=1.6.0','./platform.js?v=1.6.0','./manifest.webmanifest',
-  './icons/kontur-192.png','./icons/kontur-512.png','./automation.js?v=1.6.0','./lan.js?v=1.6.0','./cloud.js?v=1.6.0','./provisioning.js?v=1.6.0','./images/room-dome.png'
+  './','./index.html','./offline.html','./styles.css?v=1.6.1','./app.js?v=1.6.1','./i18n.js?v=1.6.1','./home-api.js?v=1.6.1','./room-scene.js?v=1.6.1','./shared-home.js?v=1.6.1',
+  './storage.js?v=1.6.1','./platform.js?v=1.6.1','./manifest.webmanifest',
+  './icons/kontur-192.png','./icons/kontur-512.png','./automation.js?v=1.6.1','./lan.js?v=1.6.1','./provisioning.js?v=1.6.1','./images/room-dome.png'
 ];
 const shellUrls = new Set(shell.map(path => new URL(path,self.registration.scope).href));
 const navigationPaths = new Set(['./','./index.html'].map(path => new URL(path,self.registration.scope).pathname));
