@@ -136,8 +136,11 @@ class ResponseReader:
         return self._read(length)
 
 
-def poll_server(context, token, manifest, result):
-    body = json.dumps({"manifest": manifest, "results": [result] if result else []}).encode("utf-8")
+def poll_server(context, token, manifest, result, enrollment_nonce=None):
+    payload = {"manifest": manifest, "results": [result] if result else []}
+    if enrollment_nonce is not None:
+        payload["enrollmentNonce"] = enrollment_nonce
+    body = json.dumps(payload).encode("utf-8")
     head = (
         "POST /api/cloud/device/poll HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\n"
         "Accept: application/json\r\nAccept-Encoding: identity\r\nContent-Type: application/json\r\n"
@@ -179,7 +182,7 @@ def poll_server(context, token, manifest, result):
 class CloudClient:
     """The worker owns network I/O. The main loop owns the LED and reports completion."""
 
-    def __init__(self, url, token, ca_file, manifest):
+    def __init__(self, url, token, ca_file, manifest, enrollment_nonce=None):
         if url not in (CLOUD_URL, CLOUD_URL + "/"):
             raise ValueError("unexpected cloud URL")
         if type(token) is not str or len(token) != 64 or any(char not in HEX_DIGITS for char in token):
@@ -189,6 +192,7 @@ class CloudClient:
         self.token = token
         self.ca_file = ca_file
         self.manifest = manifest
+        self.enrollment_nonce = enrollment_nonce
         self.lock = _thread.allocate_lock()
         self.running = True
         self.connected = False
@@ -273,7 +277,8 @@ class CloudClient:
                     clock_ready = True
                 if context is None:
                     context = tls_context(self.ca_file)
-                command = poll_server(context, self.token, self.manifest, result)
+                nonce = self.enrollment_nonce() if self.enrollment_nonce else None
+                command = poll_server(context, self.token, self.manifest, result, nonce)
                 self._record_response(result, command)
                 if not successful:
                     print("Cloud polling connected")

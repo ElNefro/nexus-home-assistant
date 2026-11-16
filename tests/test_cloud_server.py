@@ -8,7 +8,7 @@ from tempfile import TemporaryDirectory
 from threading import BoundedSemaphore
 from types import SimpleNamespace
 
-from cloud_server import (Config, Handler, MAX_PENDING, PANEL_ORIGIN, Relay, RelayError,
+from cloud_server import (AP_TTL, Config, Handler, MAX_PENDING, PANEL_ORIGIN, Relay, RelayError,
                           b64url, issue_enrollment_ticket, verify_enrollment_ticket)
 from server_accounts import Accounts
 
@@ -251,6 +251,87 @@ class RelayTest(unittest.TestCase):
                 "homeId":home_id,"revision":replay["revision"],"state":replay["state"]
             },owner)[0],200)
             self.assertEqual(post(finish,claim,owner),(409,{"error":"invalid-enrollment"}))
+
+    def test_offline_nonce_becomes_ineligible_after_clear_replace_or_first_seen_expiry(self):
+        request = {"manifest":MANIFEST,"results":[]}
+        first, second = "a"*32, "b"*32
+        with self.assertRaisesRegex(RelayError,"invalid-device-enrollment"):
+            self.relay.poll({**request,"enrollmentNonce":"A"*32})
+        self.relay.poll({**request,"enrollmentNonce":first})
+        self.assertEqual(self.relay.enrollment_manifest(first),MANIFEST)
+        self.relay.poll({**request,"enrollmentNonce":second})
+        self.assertIsNone(self.relay.enrollment_manifest(first))
+        self.assertEqual(self.relay.enrollment_manifest(second),MANIFEST)
+        self.relay.poll(request)
+        self.assertIsNone(self.relay.enrollment_manifest(second))
+        self.now = AP_TTL - 1
+        self.relay.poll({**request,"enrollmentNonce":first})
+        self.assertEqual(self.relay.enrollment_manifest(first),MANIFEST)
+        self.now = AP_TTL
+        self.relay.poll({**request,"enrollmentNonce":first})
+        with self.assertRaisesRegex(RelayError,"enrollment-expired"):
+            self.relay.enrollment_manifest(first)
+        self.relay.poll({**request,"enrollmentNonce":None})
+        self.assertIsNone(self.relay.enrollment_manifest(first))
+
+    def test_offline_claim_requires_authenticated_announcement_and_survives_restart(self):
+        with TemporaryDirectory() as directory:
+            database = Path(directory)/"homes.sqlite3"
+            server = SimpleNamespace(
+                config=Config.from_env({**config_env(),"KONTUR_SETUP_SHA256":sha256(SETUP.encode()).hexdigest()}),
+                relay=self.relay, accounts=Accounts(database), authentication_slots=BoundedSemaphore(2)
+            )
+
+            def post(route, body, bearer):
+                status, _, data = self.request(
+                    "POST","/api/" + route,bearer=bearer,origin=PANEL_ORIGIN,body=body,server=server
+                )
+                return status,data
+
+            status, account = post("account/register",{
+                "email":"owner@example.test","name":"Owner","password":"password for test"
+            },None)
+            self.assertEqual(status,201)
+            owner = account["sessionToken"]
+            status, home = post("home/create",{"name":"Home","index":"test-home","state":{
+                "rooms":[{"id":"living","name":"Living"},{"id":"study","name":"Study"}],"devices":[]
+            }},owner)
+            self.assertEqual(status,200)
+
+            nonce = "a"*32
+            message = ("kontur:offline:" + nonce + ":" + DEVICE_ID).encode("ascii")
+            proof = hmac_digest(server.config.setup_hash,message,"sha256").hex()
+            claim = {"homeId":home["id"],"roomId":"living","deviceId":DEVICE_ID,"nonce":nonce,"proof":proof}
+            finish = "home/cloud/enroll/offline"
+            poll = "/api/cloud/device/poll"
+            advertisement = {"manifest":MANIFEST,"results":[],"enrollmentNonce":nonce}
+
+            self.assertEqual(post(finish,claim,None)[0],401)
+            self.assertEqual(post(finish,{**claim,"roomId":"missing"},owner)[0],400)
+            self.assertEqual(post(finish,{**claim,"proof":"0"*64},owner),(400,{"error":"invalid-enrollment"}))
+            self.assertEqual(self.request("POST",poll,bearer=owner,body=advertisement,server=server)[0],401)
+            self.assertEqual(post(finish,claim,owner),(409,{"error":"device-offline"}))
+            self.assertEqual(self.request("POST",poll,bearer=DEVICE,body=advertisement,server=server)[0],200)
+            status, claimed = post(finish,claim,owner)
+            self.assertEqual(status,200)
+            self.assertEqual(claimed["state"]["devices"][0]["roomId"],"living")
+            self.assertTrue(claimed["state"]["devices"][0]["online"])
+
+            server.accounts = Accounts(database)
+            server.relay = Relay(DEVICE_ID,lambda: self.now)
+            status, repeated = post(finish,{**claim,"roomId":"study"},owner)
+            self.assertEqual(status,200)
+            self.assertEqual(repeated["revision"],claimed["revision"])
+            self.assertEqual(repeated["state"]["devices"][0]["roomId"],"living")
+            self.assertFalse(repeated["state"]["devices"][0]["online"])
+            repeated["state"]["devices"] = []
+            self.assertEqual(post("home/save",{
+                "homeId":home["id"],"revision":repeated["revision"],"state":repeated["state"]
+            },owner)[0],200)
+            self.assertEqual(self.request("POST",poll,bearer=DEVICE,body=advertisement,server=server)[0],200)
+            self.assertEqual(post(finish,claim,owner),(410,{"error":"enrollment-expired"}))
+            server.accounts.bind_cloud_device(home["id"],MANIFEST,"study")
+            self.assertEqual(post(finish,claim,owner),(410,{"error":"enrollment-expired"}))
 
 
 if __name__ == "__main__":

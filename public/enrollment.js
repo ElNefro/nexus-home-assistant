@@ -3,16 +3,19 @@
 (function expose(root) {
   const storageKey = 'kontur-pending-enrollment-1.7';
   const maxAge = 15 * 60_000;
-  const fields = ['enroll','deviceId','proof'];
+  const fields = ['enroll','setupNonce','deviceId','proof'];
   const ticketPattern = /^[A-Za-z0-9_-]{1,320}\.[A-Za-z0-9_-]{43}$/;
+  const noncePattern = /^[0-9a-f]{32}$/;
   const devicePattern = /^[a-z0-9][a-z0-9_-]{0,63}$/;
   const proofPattern = /^[0-9a-f]{64}$/;
   let pending;
 
   function valid(record) {
-    return typeof record?.ticket === 'string' && ticketPattern.test(record.ticket) &&
-      typeof record.deviceId === 'string' && devicePattern.test(record.deviceId) &&
-      typeof record.proof === 'string' && proofPattern.test(record.proof);
+    if (typeof record?.deviceId !== 'string' || !devicePattern.test(record.deviceId) ||
+        typeof record.proof !== 'string' || !proofPattern.test(record.proof)) return false;
+    return record.nonce === undefined
+      ? typeof record.ticket === 'string' && ticketPattern.test(record.ticket)
+      : record.ticket === undefined && typeof record.nonce === 'string' && noncePattern.test(record.nonce);
   }
 
   function remember(record) {
@@ -33,11 +36,15 @@
   }
 
   function capture(params) {
-    if (!params.has('enroll') && !params.has('proof')) return '';
+    if (!params.has('enroll') && !params.has('setupNonce') && !params.has('proof')) return '';
+    const callbackField = params.has('setupNonce') ? 'setupNonce' : 'enroll';
+    const required = [callbackField,'deviceId','proof'];
     const record = {
-      ticket:params.get('enroll'),deviceId:params.get('deviceId'),proof:params.get('proof'),capturedAt:Date.now()
+      [callbackField === 'setupNonce' ? 'nonce' : 'ticket']:params.get(callbackField),
+      deviceId:params.get('deviceId'),proof:params.get('proof'),capturedAt:Date.now()
     };
-    const accepted = fields.every(field => params.getAll(field).length === 1) && valid(record);
+    const unambiguous = !params.has('enroll') || !params.has('setupNonce');
+    const accepted = unambiguous && required.every(field => params.getAll(field).length === 1) && valid(record);
     if (accepted) remember(record);
     for (const field of fields) params.delete(field);
     if (!params.has('page')) params.set('page','devices');
@@ -48,9 +55,11 @@
   }
 
   function portal(ticket,locale) {
-    if (typeof ticket !== 'string' || !ticketPattern.test(ticket)) throw Error('invalid-enrollment');
+    if (ticket !== undefined && (typeof ticket !== 'string' || !ticketPattern.test(ticket))) throw Error('invalid-enrollment');
     const url = new URL('http://192.168.4.1/');
-    url.hash = new URLSearchParams({ticket,lang:locale === 'en' ? 'en' : 'ru'});
+    const params = new URLSearchParams({lang:locale === 'en' ? 'en' : 'ru'});
+    if (ticket !== undefined) params.set('ticket',ticket);
+    url.hash = params.toString();
     return url.href;
   }
 

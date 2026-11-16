@@ -14,7 +14,7 @@ import secrets
 from threading import Lock, BoundedSemaphore
 import time
 
-from server_accounts import AccountError, Accounts, SESSION_COOKIE, identifier
+from server_accounts import AccountError, Accounts, CLOUD_ENROLLMENT_NONCE, SESSION_COOKIE, identifier
 
 
 PANEL_ORIGIN = "https://nexus-home-assistant.onrender.com"
@@ -35,6 +35,7 @@ AP_TICKET = re.compile(r"([A-Za-z0-9_-]{1,320})\.([A-Za-z0-9_-]{43})", re.ASCII)
 AP_NONCE = re.compile(r"[A-Za-z0-9_-]{22}", re.ASCII)
 AP_TTL = 15 * 60
 AP_REPLAY_LIMIT = 1024
+AP_SEEN_LIMIT = 128
 
 
 class RelayError(Exception):
@@ -208,6 +209,8 @@ class Relay:
         self.commands = {}
         self.enrollment_lock = Lock()
         self.used_enrollments = {}
+        self.enrollment_nonce = None
+        self.enrollment_seen = {}
 
     def online(self, now):
         return self.last_seen is not None and now - self.last_seen < ONLINE_WINDOW
@@ -256,11 +259,19 @@ class Relay:
     def poll(self, body):
         manifest = normalize_manifest(body.get("manifest"), self.device_id)
         results = normalize_results(body.get("results"))
+        nonce = body.get("enrollmentNonce")
+        if nonce is not None and (not isinstance(nonce, str) or not CLOUD_ENROLLMENT_NONCE.fullmatch(nonce)):
+            raise RelayError(400, "invalid-device-enrollment")
         with self.lock:
             now = self.clock()
             self.maintain(now)
             self.manifest = manifest
             self.last_seen = now
+            self.enrollment_nonce = nonce
+            if nonce is not None and nonce not in self.enrollment_seen:
+                if len(self.enrollment_seen) >= AP_SEEN_LIMIT:
+                    del self.enrollment_seen[next(iter(self.enrollment_seen))]
+                self.enrollment_seen[nonce] = now
             for key, ok in results.items():
                 command = self.commands.get(key)
                 if command is not None and command.status == "pending" and command.delivered:
@@ -270,6 +281,15 @@ class Relay:
                     command.delivered = True
                     return {"command": {"id": key, "capability": "power", "value": True}}
             return {"command": None}
+
+    def enrollment_manifest(self, nonce):
+        with self.lock:
+            if nonce is None or nonce != self.enrollment_nonce:
+                return None
+            now = self.clock()
+            if now >= self.enrollment_seen[nonce] + AP_TTL:
+                raise RelayError(410, "enrollment-expired")
+            return self.manifest if self.online(now) else None
 
 
 def owner_method(path):
@@ -288,7 +308,7 @@ HOME_ROUTES = {
     **{f"/api/account/{action}": "POST" for action in ("register", "login", "logout", "recover", "profile")},
     **{f"/api/home/{action}": "POST" for action in (
         "create", "get", "save", "command", "schedule", "invite", "join", "revoke", "member-prefix",
-        "cloud/claim", "cloud/enroll/start", "cloud/enroll/finish"
+        "cloud/claim", "cloud/enroll/start", "cloud/enroll/finish", "cloud/enroll/offline"
     )},
 }
 
@@ -323,6 +343,19 @@ def start_enrollment(accounts, cookie, config, body):
     return {"ticket": issue_enrollment_ticket(config, actor["userId"], home_id, room_id, int(time.time()))}
 
 
+def verify_enrollment_proof(config, device_id, proof, method, challenge):
+    if device_id != config.device_id:
+        raise RelayError(404, "device-not-found")
+    if config.setup_hash is None:
+        raise RelayError(503, "enrollment-unavailable")
+    if not isinstance(proof, str) or not AP_PROOF.fullmatch(proof):
+        raise RelayError(400, "invalid-enrollment")
+    message = f"kontur:{method}:{challenge}:{device_id}".encode("ascii")
+    expected = hmac_digest(config.setup_hash, message, "sha256").hex()
+    if not compare_digest(proof, expected):
+        raise RelayError(400, "invalid-enrollment")
+
+
 def finish_enrollment(accounts, cookie, config, relay, body):
     ticket, device_id, proof = body.get("ticket"), body.get("deviceId"), body.get("proof")
     now = int(time.time())
@@ -330,16 +363,7 @@ def finish_enrollment(accounts, cookie, config, relay, body):
     actor = accounts.authorize(cookie, claims.home, owner=True)
     if actor["userId"] != claims.owner:
         raise RelayError(403, "invalid-enrollment")
-    if device_id != config.device_id:
-        raise RelayError(404, "device-not-found")
-    if config.setup_hash is None:
-        raise RelayError(503, "enrollment-unavailable")
-    if not isinstance(proof, str) or not AP_PROOF.fullmatch(proof):
-        raise RelayError(400, "invalid-enrollment")
-    message = ("kontur:ap:" + ticket + ":" + device_id).encode("ascii")
-    expected = hmac_digest(config.setup_hash, message, "sha256").hex()
-    if not compare_digest(proof, expected):
-        raise RelayError(400, "invalid-enrollment")
+    verify_enrollment_proof(config, device_id, proof, "ap", ticket)
 
     with relay.enrollment_lock:
         now = int(time.time())
@@ -360,6 +384,25 @@ def finish_enrollment(accounts, cookie, config, relay, body):
         accounts.bind_cloud_device(claims.home, record["manifest"], claims.room)
         relay.used_enrollments[claims.nonce] = claims.expiry
         return claims.home
+
+
+def finish_offline_enrollment(accounts, cookie, config, relay, body):
+    home_id, room_id = body.get("homeId"), body.get("roomId")
+    device_id, nonce, proof = body.get("deviceId"), body.get("nonce"), body.get("proof")
+    accounts.authorize(cookie, home_id, owner=True)
+    if not isinstance(nonce, str) or not CLOUD_ENROLLMENT_NONCE.fullmatch(nonce):
+        raise RelayError(400, "invalid-enrollment")
+    verify_enrollment_proof(config, device_id, proof, "offline", nonce)
+    require_enrollment_room(accounts, cookie, home_id, room_id)
+
+    with relay.enrollment_lock:
+        if accounts.cloud_enrollment_applied(home_id, "cloud-" + device_id, nonce):
+            return home_id
+        manifest = relay.enrollment_manifest(nonce)
+        if manifest is None or manifest["id"] != device_id:
+            raise RelayError(409, "device-offline")
+        accounts.bind_cloud_device(home_id, manifest, room_id, enrollment_nonce=nonce)
+        return home_id
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -425,6 +468,9 @@ class Handler(BaseHTTPRequestHandler):
             return 200, start_enrollment(accounts, cookie, config, body)
         if path == "/api/home/cloud/enroll/finish":
             body = {"homeId": finish_enrollment(accounts, cookie, config, relay, body)}
+            path = "/api/home/get"
+        elif path == "/api/home/cloud/enroll/offline":
+            body = {"homeId": finish_offline_enrollment(accounts, cookie, config, relay, body)}
             path = "/api/home/get"
         elif path == "/api/home/cloud/claim":
             home_id = body.get("homeId")

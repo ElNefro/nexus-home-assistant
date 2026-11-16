@@ -3,6 +3,7 @@
 import binascii
 import hashlib
 import json
+import os
 import socket
 from network import WLAN
 from time import ticks_add, ticks_diff, ticks_ms
@@ -14,6 +15,7 @@ AP_IP = "192.168.4.1"
 AP_HOSTS = (b"192.168.4.1", b"192.168.4.1:80")
 AP_ORIGIN = b"http://192.168.4.1"
 AP_DURATION_MS = 600000
+ENROLLMENT_DURATION_MS = 900000
 WIFI_CONNECT_MS = 20000
 START_DELAY_MS = 250
 PROOF_WAIT_MS = 35000
@@ -22,6 +24,8 @@ MAX_HEADERS = 3072
 MAX_BODY = 768
 REQUEST_TIMEOUT_MS = 1400
 TICKET_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+LOCAL_TICKET_PREFIX = "local-"
+HEX_CHARS = "0123456789abcdef"
 
 
 PORTAL_PAGE = r"""<!doctype html>
@@ -45,28 +49,30 @@ button,a{display:block;width:100%;margin-top:24px;padding:12px;border:0;border-r
 (() => {
   const el = id => document.getElementById(id);
   const args = new URLSearchParams(location.hash.slice(1));
-  const ticket = args.get('ticket') || '';
-  const en = args.get('lang') === 'en';
+  const data = JSON.parse(el('device-data').textContent);
+  const preparedTicket = args.get('ticket');
+  const ticket = preparedTicket ?? data.localTicket;
+  const local = preparedTicket === null;
+  const en = (args.get('lang') || navigator.language || 'ru').toLowerCase().startsWith('en');
   const strings = en ? {
     title:'Connect to Wi-Fi', hint:'Enter the name and password of your 2.4 GHz home network.',
     device:'Device', ssid:'Wi-Fi network name', password:'Wi-Fi password', submit:'Connect',
-    ticket:'Open the setup link from Kontur again.', connecting:'Connecting to your home Wi-Fi…',
-    connected:'Device connected. Wait for your phone to rejoin your usual network, then return to Kontur.',
+    ticket:'The setup link is invalid. Open the device page again.', connecting:'Connecting to your home Wi-Fi…',
+    connected:'Device connected. Switch your phone back to your home Wi-Fi, then tap Return to Kontur.',
     returnLink:'Return to Kontur', failed:'Could not connect. Check the network name and password, then try again.',
     link:'The setup network is unavailable. Rejoin it and open this page again.',
     invalid:'Enter up to 32 bytes for the network name. Use 8–63 bytes for the password or leave it empty for an open network.'
   } : {
     title:'Подключение к Wi-Fi', hint:'Введи имя и пароль домашней сети 2,4 ГГц.',
     device:'Прибор', ssid:'Имя сети Wi-Fi', password:'Пароль Wi-Fi', submit:'Подключить',
-    ticket:'Заново открой ссылку на подключение из «Контура».', connecting:'Прибор подключается к домашней сети…',
-    connected:'Прибор подключён. Дождись, пока телефон вернётся в свою сеть, затем открой «Контур».',
+    ticket:'Ссылка настройки недействительна. Заново открой страницу прибора.', connecting:'Прибор подключается к домашней сети…',
+    connected:'Прибор подключён. Верни телефон в домашнюю сеть Wi-Fi и нажми «Вернуться в Контур».',
     returnLink:'Вернуться в «Контур»', failed:'Не удалось подключиться. Проверь имя и пароль сети и попробуй ещё раз.',
     link:'Нет связи с сетью прибора. Подключись к ней и снова открой эту страницу.',
     invalid:'В имени сети должно быть не более 32 байт. Для пароля введи 8–63 байта или оставь поле пустым для открытой сети.'
   };
   document.documentElement.lang = en ? 'en' : 'ru';
   document.title = strings.title + ' · Контур';
-  const data = JSON.parse(el('device-data').textContent);
   const option = document.createElement('option');
   option.value = data.id;
   option.textContent = data.name;
@@ -79,7 +85,8 @@ button,a{display:block;width:100%;margin-top:24px;padding:12px;border:0;border-r
   const form = el('form');
   const button = el('submit');
   const password = el('password');
-  if (!/^[A-Za-z0-9_-]{1,320}\.[A-Za-z0-9_-]{43}$/.test(ticket)) { update(strings.ticket,true); return; }
+  const ticketPattern = local ? /^local-[0-9a-f]{32}$/ : /^[A-Za-z0-9_-]{1,320}\.[A-Za-z0-9_-]{43}$/;
+  if (!ticketPattern.test(ticket)) { update(strings.ticket,true); return; }
 
   async function send(path, values) {
     const cancel = new AbortController();
@@ -102,17 +109,20 @@ button,a{display:block;width:100%;margin-top:24px;padding:12px;border:0;border-r
     }
     if (result.state === 'connected' && /^[0-9a-f]{64}$/.test(result.proof)) {
       const link = el('return-link');
-      link.href = 'https://nexus-home-assistant.onrender.com/#page=devices&enroll=' + encodeURIComponent(ticket) +
-        '&deviceId=' + encodeURIComponent(data.id) + '&proof=' + result.proof;
+      const route = new URLSearchParams({page:'devices',deviceId:data.id,proof:result.proof});
+      route.set(local ? 'setupNonce' : 'enroll',local ? ticket.slice(6) : ticket);
+      link.href = 'https://nexus-home-assistant.onrender.com/#' + route.toString();
       password.value = '';
       form.hidden = true;
       link.hidden = false;
       update(strings.connected);
-      const forward = () => location.assign(link.href);
-      setTimeout(() => {
-        if (navigator.onLine) forward();
-        else window.addEventListener('online',forward,{once:true});
-      }, 9500);
+      if (!local) {
+        const forward = () => location.assign(link.href);
+        setTimeout(() => {
+          if (navigator.onLine) forward();
+          else window.addEventListener('online',forward,{once:true});
+        }, 9500);
+      }
       return;
     }
     if (result.state === 'wifi-error') update(strings.failed,true);
@@ -151,7 +161,12 @@ class PortalExpired(Exception):
 
 
 def valid_ticket(ticket):
-    if type(ticket) is not str or not 45 <= len(ticket) <= 364:
+    if type(ticket) is not str:
+        return False
+    if ticket.startswith(LOCAL_TICKET_PREFIX):
+        nonce = ticket[len(LOCAL_TICKET_PREFIX):]
+        return len(nonce) == 32 and all(char in HEX_CHARS for char in nonce)
+    if not 45 <= len(ticket) <= 364:
         return False
     payload, separator, signature = ticket.partition(".")
     return (bool(separator) and 1 <= len(payload) <= 320 and len(signature) == 43
@@ -159,7 +174,11 @@ def valid_ticket(ticket):
 
 
 def enrollment_proof(setup_digest, device_id, ticket):
-    message = ("kontur:ap:" + ticket + ":" + device_id).encode("ascii")
+    if ticket.startswith(LOCAL_TICKET_PREFIX):
+        data = "kontur:offline:" + ticket[len(LOCAL_TICKET_PREFIX):]
+    else:
+        data = "kontur:ap:" + ticket
+    message = (data + ":" + device_id).encode("ascii")
     return binascii.hexlify(hmac_sha256(setup_digest, message)).decode("ascii")
 
 
@@ -235,7 +254,10 @@ class Portal:
         self.setup_digest = hashlib.sha256(setup_key.lower().encode("ascii")).digest()
         self.device_id = device_id
         self.ssid = "Kontur-" + device_id[-6:].upper()
-        data = json.dumps({"id": device_id, "name": name}).replace("<", "\\u003c")
+        self.local_nonce = binascii.hexlify(os.urandom(16)).decode("ascii")
+        self.local_ticket = LOCAL_TICKET_PREFIX + self.local_nonce
+        self.enrollment = None
+        data = json.dumps({"id": device_id, "name": name, "localTicket": self.local_ticket}).replace("<", "\\u003c")
         self.page = PORTAL_PAGE.replace("$KONTUR_DEVICE_DATA$", data).encode()
         self.state = "ready"
         self.ticket = None
@@ -306,6 +328,9 @@ class Portal:
         if method != b"POST" or path not in (b"/api/setup", b"/api/status"):
             raise PortalError(404, "Not Found")
         message = read_post(client, headers, body, deadline)
+        ticket = message["ticket"]
+        if ticket.startswith(LOCAL_TICKET_PREFIX) and ticket != self.local_ticket:
+            raise PortalError(403, "Forbidden")
         if path == b"/api/setup":
             result = self._setup(message)
         elif len(message) == 1:
@@ -371,6 +396,8 @@ class Portal:
             wlan.config(reconnects=-1)
             self.credentials = None
             self.proof = enrollment_proof(self.setup_digest, self.device_id, self.ticket)
+            if self.ticket == self.local_ticket:
+                self.enrollment = (self.local_nonce, ticks_add(now, ENROLLMENT_DURATION_MS))
             self.state = "connected"
             self.deadline = ticks_add(now, PROOF_WAIT_MS)
             print("Wi-Fi setup validated and saved")

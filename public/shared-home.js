@@ -17,6 +17,7 @@ const sharedHome = (() => {
   let finishingEnrollment;
   let checkingEnrollmentSession = false;
   let enrollmentNotice = '';
+  let enrollmentDestination;
 
   function message(error) {
     const errors = {
@@ -70,6 +71,7 @@ const sharedHome = (() => {
     if (!konturHome.cloud()) return;
     const result = konturEnrollment.capture(params);
     if (!result) return;
+    if (result === 'captured') enrollmentDestination = undefined;
     enrollmentNotice = result === 'invalid-enrollment' ? message(Error(result)) : '';
     if (result === 'captured' && user) void finishEnrollment();
   }
@@ -244,23 +246,58 @@ const sharedHome = (() => {
     return konturEnrollment.portal(ticket,konturI18n.getLocale());
   }
 
+  function enrollmentHomes() {
+    return homes.filter(item => item.role === 'owner');
+  }
+
+  function chooseEnrollmentHome(id) {
+    enrollmentDestination = {homeId:id};
+    void finishEnrollment();
+  }
+
   async function finishEnrollment() {
     const record = konturEnrollment.pending;
     if (!konturHome.cloud() || !user || !record || finishingEnrollment) return;
+    const owned = record.nonce ? enrollmentHomes() : [];
+    const destination = owned.find(item => item.id === enrollmentDestination?.homeId) ??
+      (owned.length === 1 ? owned[0] : undefined);
+    if (record.nonce && !destination) {
+      render();
+      return;
+    }
     finishingEnrollment = record;
     enrollmentNotice = '';
     if (!dialog.open) render();
     const owner = user.id;
     const stillCurrent = () => user?.id === owner && konturEnrollment.pending === record;
     try {
+      let route = 'home/cloud/enroll/finish';
+      const body = {deviceId:record.deviceId,proof:record.proof};
+      if (record.nonce) {
+        // A newly created room must be saved before the server can bind to it.
+        await requestQueue;
+        if (!stillCurrent()) return;
+        if (home?.id !== destination.id) {
+          const snapshot = await api('home/get',{homeId:destination.id});
+          if (!stillCurrent()) return;
+          openSnapshot(snapshot);
+        }
+        const room = enrollmentDestination?.homeId === destination.id
+          ? data.rooms.find(item => item.id === enrollmentDestination.roomId) : undefined;
+        const targetRoom = room ?? (data.rooms.length === 1 ? data.rooms[0] : undefined);
+        enrollmentDestination = {homeId:destination.id,roomId:targetRoom?.id};
+        if (!targetRoom) return;
+        route = 'home/cloud/enroll/offline';
+        Object.assign(body,{homeId:destination.id,roomId:targetRoom.id,nonce:record.nonce});
+      } else body.ticket = record.ticket;
+
       for (let attempt = 0; attempt < 6; attempt++) {
         if (!stillCurrent()) return;
         try {
-          const snapshot = await api('home/cloud/enroll/finish',{
-            ticket:record.ticket,deviceId:record.deviceId,proof:record.proof
-          });
+          const snapshot = await api(route,body);
           if (!stillCurrent()) return;
           konturEnrollment.clear(record);
+          enrollmentDestination = undefined;
           if (!homes.some(item => item.id === snapshot.id)) {
             homes.push({id:snapshot.id,name:snapshot.name,role:snapshot.role,index:snapshot.index});
           }
@@ -300,24 +337,81 @@ const sharedHome = (() => {
     if (!record && !enrollmentNotice) return null;
     const panel = node('section','panel profile-section');
     panel.append(node('h2','',t('Настройка прибора')));
+    const signIn = record?.nonce ? 'Войди или создай аккаунт, чтобы добавить прибор в дом.'
+      : 'Войди в аккаунт владельца дома, чтобы завершить привязку.';
     const feedback = node('p','sub',enrollmentNotice || t(checkingEnrollmentSession ? 'Проверяем вход в аккаунт…'
-      : !user ? 'Войди в аккаунт владельца дома, чтобы завершить привязку.'
+      : !user ? signIn
+      : record?.nonce && !finishingEnrollment ? 'Выбери дом и комнату для нового прибора.'
       : 'Ждём подключения прибора к интернету…'));
     feedback.setAttribute('role','status');
     panel.append(feedback);
     if (finishingEnrollment || checkingEnrollmentSession) return panel;
     const actions = node('div','row-buttons');
-    if (record && (user || enrollmentNotice)) actions.append(button(t('Повторить привязку'),'primary',retryEnrollment));
+    if (record?.nonce && user) {
+      appendEnrollmentDestination(panel,actions);
+    } else if (record && (user || enrollmentNotice)) {
+      actions.append(button(t('Повторить привязку'),'primary',retryEnrollment));
+    }
     if (record && !user && page !== 'profile') {
       actions.append(button(t('Открыть профиль'),'primary',() => navigate('profile')));
     }
     actions.append(button(t('Закрыть'),'ghost',() => {
       konturEnrollment.clear(record);
+      enrollmentDestination = undefined;
       enrollmentNotice = '';
       render();
     }));
     panel.append(actions);
     return panel;
+  }
+
+  function enrollmentSelect(caption,id,items,labelFor,selected) {
+    const select = node('select');
+    select.id = id;
+    select.setAttribute('aria-label',t(caption));
+    const placeholder = node('option','',t(caption));
+    placeholder.value = '';
+    select.append(placeholder);
+    for (const item of items) {
+      const option = node('option','',labelFor(item));
+      option.value = item.id;
+      select.append(option);
+    }
+    select.value = selected ?? '';
+    return select;
+  }
+
+  function appendEnrollmentDestination(panel,actions) {
+    const owned = enrollmentHomes();
+    if (!owned.length) {
+      actions.append(button(t('Создать дом'),'primary',create));
+      return;
+    }
+    const selection = enrollmentDestination?.homeId;
+    const selected = owned.some(item => item.id === selection) ? selection
+      : owned.length === 1 ? owned[0].id : undefined;
+    if (owned.length > 1) {
+      const homeChoice = enrollmentSelect('Выбери дом','enrollment-home',owned,item => item.name,selected);
+      homeChoice.addEventListener('change',() => {
+        if (homeChoice.value) chooseEnrollmentHome(homeChoice.value);
+      });
+      panel.append(homeChoice);
+    }
+    if (!selected || home?.id !== selected) {
+      if (selected) actions.append(button(t('Повторить привязку'),'primary',retryEnrollment));
+      return;
+    }
+    const roomChoice = enrollmentSelect('Выбери комнату','enrollment-room',data.rooms,roomName,
+      enrollmentDestination?.roomId ?? (data.rooms.length === 1 ? data.rooms[0].id : undefined));
+    const chooseRoom = button(t(enrollmentNotice ? 'Повторить привязку' : 'Привязать'),'primary',() => {
+      if (!roomChoice.value) return;
+      enrollmentDestination = {homeId:selected,roomId:roomChoice.value};
+      void finishEnrollment();
+    });
+    chooseRoom.disabled = !roomChoice.value;
+    roomChoice.addEventListener('change',() => { chooseRoom.disabled = !roomChoice.value; });
+    panel.append(roomChoice);
+    actions.append(chooseRoom,button(t('＋ Создать комнату'),'ghost',() => editRoom()));
   }
 
   async function retryEnrollment() {
@@ -457,7 +551,10 @@ const sharedHome = (() => {
         homes.push({id:snapshot.id,name:snapshot.name,role:snapshot.role,index:snapshot.index});
         dialog.close();
         openSnapshot(snapshot);
-        navigate('rooms');
+        if (konturEnrollment.pending?.nonce && konturHome.cloud()) {
+          navigate('devices');
+          chooseEnrollmentHome(snapshot.id);
+        } else navigate('rooms');
       } catch (errorValue) {
         showError(error,message(errorValue));
       } finally {

@@ -21,6 +21,7 @@ BINDING_TABLES = {"lan": "lan_bindings", "cloud": "cloud_bindings"}
 ID = re.compile(r"[A-Za-z0-9_-]{1,128}", re.ASCII)
 CAPABILITY_ID = re.compile(r"[a-z][a-z0-9_-]{0,39}", re.ASCII)
 DEVICE_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}", re.ASCII)
+CLOUD_ENROLLMENT_NONCE = re.compile(r"[a-f0-9]{32}", re.ASCII)
 HOME_INDEX = re.compile(r"[A-Z0-9]+(?:-[A-Z0-9]+)*", re.ASCII)
 TIME = re.compile(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]")
 EMAIL = re.compile(r"[^@\s]+@[^@\s.]+(?:\.[^@\s.]+)+")
@@ -62,6 +63,13 @@ CREATE TABLE IF NOT EXISTS lan_bindings (
 CREATE TABLE IF NOT EXISTS cloud_bindings (
     device_id TEXT PRIMARY KEY,
     home_id TEXT NOT NULL REFERENCES homes(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS cloud_enrollment_uses (
+    device_id TEXT NOT NULL,
+    nonce TEXT NOT NULL,
+    home_id TEXT NOT NULL REFERENCES homes(id) ON DELETE CASCADE,
+    binding_id TEXT REFERENCES cloud_bindings(device_id) ON DELETE SET NULL,
+    PRIMARY KEY (device_id, nonce)
 );
 CREATE TABLE IF NOT EXISTS home_indices (
     home_index TEXT PRIMARY KEY,
@@ -621,19 +629,42 @@ class Accounts:
     def lookup_binding(self, db, table, device_id):
         return db.execute(f"SELECT home_id FROM {table} WHERE device_id=?", (device_id,)).fetchone()
 
+    def cloud_enrollment_applied(self, home_id, device_id, nonce):
+        with self.connect() as db:
+            return self._cloud_enrollment_applied(db, home_id, device_id, nonce)
+
+    def _cloud_enrollment_applied(self, db, home_id, device_id, nonce):
+        record = db.execute(
+            "SELECT home_id,binding_id FROM cloud_enrollment_uses WHERE device_id=? AND nonce=?",
+            (device_id, nonce)
+        ).fetchone()
+        if record is None:
+            return False
+        # Unbinding nulls this reference permanently, even if another enrollment binds the device later.
+        require(record["home_id"] == home_id and record["binding_id"] == device_id, 410, "enrollment-expired")
+        return True
+
     def bind_device(self, home_id, manifest, room_id, state):
         """Record a manifest and readings already confirmed by the LAN adapter."""
         return self.bind_physical_device("lan", home_id, manifest, room_id, state, online=True)
 
-    def bind_cloud_device(self, home_id, manifest, room_id, *, online=False):
+    def bind_cloud_device(self, home_id, manifest, room_id, *, online=False, enrollment_nonce=None):
         """Record an authenticated manifest from the cloud transport."""
-        return self.bind_physical_device("cloud", home_id, manifest, room_id, {}, online=online)
+        if enrollment_nonce is not None:
+            require(isinstance(enrollment_nonce, str) and CLOUD_ENROLLMENT_NONCE.fullmatch(enrollment_nonce),
+                    400, "invalid-enrollment")
+        return self.bind_physical_device(
+            "cloud", home_id, manifest, room_id, {}, online=online, enrollment_nonce=enrollment_nonce
+        )
 
-    def bind_physical_device(self, transport, home_id, manifest, room_id, state, online):
+    def bind_physical_device(self, transport, home_id, manifest, room_id, state, online, enrollment_nonce=None):
         physical_id = manifest.get("id")
         require(isinstance(physical_id, str) and DEVICE_ID.fullmatch(physical_id), 400, "invalid-device")
         device_id = transport + "-" + physical_id
         with self.connect(write=True) as db:
+            if enrollment_nonce is not None and self._cloud_enrollment_applied(db, home_id, device_id, enrollment_nonce):
+                home = db.execute("SELECT data FROM homes WHERE id=?", (home_id,)).fetchone()
+                return self.device_for(json.loads(home["data"]), device_id)
             for existing_transport, table in BINDING_TABLES.items():
                 existing_id = existing_transport + "-" + physical_id
                 claim = self.lookup_binding(db, table, existing_id)
@@ -667,6 +698,9 @@ class Accounts:
                 data["devices"][data["devices"].index(old)] = device
             table = BINDING_TABLES[transport]
             db.execute(f"INSERT INTO {table} VALUES (?,?) ON CONFLICT (device_id) DO NOTHING", (device_id, home_id))
+            if enrollment_nonce is not None:
+                db.execute("INSERT INTO cloud_enrollment_uses VALUES (?,?,?,?)",
+                           (device_id, enrollment_nonce, home_id, device_id))
             self.store_home(db, home_id, data)
             return device
 

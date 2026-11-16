@@ -22,6 +22,7 @@ CLOUD_POLL = "/api/cloud/device/poll"
 LAN_PREFIX = "/kontur/v1/"
 PRIVATE_NETWORKS = tuple(map(ipaddress.IPv4Network, ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")))
 TOKEN = re.compile(r"[A-Za-z0-9_-]{32,128}", re.ASCII)
+ENROLLMENT_NONCE = re.compile(r"[0-9a-f]{32}", re.ASCII)
 MAX_JSON = 8192
 POLL_INTERVAL = 2
 LAN_TIMEOUT = 1.5
@@ -113,9 +114,11 @@ class Gateway:
         token = self.config.lan_device_token if authenticated else None
         return request_json(connection, "ESP32", LAN_PREFIX + path, token, body)
 
-    def cloud(self, manifest):
+    def cloud(self, manifest, enrollment_nonce=None):
         connection = HTTPSConnection(CLOUD_HOST, 443, timeout=CLOUD_TIMEOUT, context=self.tls)
         payload = {"manifest": manifest, "results": [self.result] if self.result else []}
+        if enrollment_nonce is not None:
+            payload["enrollmentNonce"] = enrollment_nonce
         response = request_json(connection, "Render", CLOUD_POLL, self.config.cloud_token, payload)
         if "command" not in response:
             raise GatewayError("Render returned no command field")
@@ -178,9 +181,12 @@ class Gateway:
         state = self.lan("state")
         if type(state.get("power")) is not bool:
             raise GatewayError("ESP32 did not confirm its state")
+        nonce = state.get("enrollmentNonce")
+        if not isinstance(nonce, str) or not ENROLLMENT_NONCE.fullmatch(nonce):
+            nonce = None
         started = time.monotonic()
         fresh_session = self.last_poll is not None and started - self.last_poll < ONLINE_WINDOW
-        command = self.cloud(manifest)
+        command = self.cloud(manifest, nonce)
         self.last_poll = time.monotonic()
         self.result = None
         if command is not None:

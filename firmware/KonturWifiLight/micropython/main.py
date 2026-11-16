@@ -216,7 +216,13 @@ def read_command(client, headers, body, deadline, fields=("capability", "value")
     return command
 
 
-def route(client, manifest, expected_token, indicator, gateway=None):
+def active_enrollment(enrollment):
+    if enrollment and ticks_diff(enrollment[1], ticks_ms()) > 0:
+        return enrollment[0]
+    return None
+
+
+def route(client, manifest, expected_token, indicator, gateway=None, enrollment=None):
     deadline = ticks_add(ticks_ms(), REQUEST_TIMEOUT_MS)
     method, path, headers, body = read_headers(client, deadline)
     if method == b"GET" and path == ROUTE_PREFIX + b"manifest":
@@ -230,6 +236,10 @@ def route(client, manifest, expected_token, indicator, gateway=None):
         raise RequestError(404, "not-found")
     if not authorized(headers.get(b"authorization"), expected_token):
         raise RequestError(401, "token-required")
+    if read and gateway is not None:
+        nonce = active_enrollment(enrollment)
+        if nonce:
+            return {"power": False, "enrollmentNonce": nonce}
     if gateway_submit:
         command = read_command(client, headers, body, deadline, ("id", "capability", "value"))
         return gateway.submit(command)
@@ -252,10 +262,10 @@ def route(client, manifest, expected_token, indicator, gateway=None):
     return {"power": False}
 
 
-def serve_client(client, manifest, expected_token, indicator, gateway=None):
+def serve_client(client, manifest, expected_token, indicator, gateway=None, enrollment=None):
     try:
         try:
-            result = route(client, manifest, expected_token, indicator, gateway)
+            result = route(client, manifest, expected_token, indicator, gateway, enrollment)
             status = 200
         except RequestError as error:
             status, message = error.args
@@ -329,7 +339,7 @@ def manifest_for(device_id):
     }
 
 
-def start_cloud(manifest):
+def start_cloud(manifest, enrollment=None):
     url = getattr(kontur_config, "CLOUD_URL", "")
     token = getattr(kontur_config, "CLOUD_TOKEN", "")
     if not url and not token:
@@ -337,7 +347,7 @@ def start_cloud(manifest):
     try:
         from kontur_cloud import CloudClient
         ca_file = getattr(kontur_config, "CLOUD_CA_FILE", "/kontur-cloud-ca.pem")
-        return CloudClient(url, token, ca_file, manifest)
+        return CloudClient(url, token, ca_file, manifest, lambda: active_enrollment(enrollment))
     except (ImportError, ValueError, OSError, MemoryError) as error:
         print("Cloud configuration unavailable:", type(error).__name__)
         return None
@@ -381,6 +391,7 @@ def run():
     cloud = None
     gateway = None
     provisioning = None
+    enrollment = None
     if (getattr(kontur_config, "CLOUD_GATEWAY", False) is True
             and not getattr(kontur_config, "CLOUD_URL", "") and not getattr(kontur_config, "CLOUD_TOKEN", "")):
         gateway = GatewayCommands(indicator)
@@ -405,6 +416,8 @@ def run():
                         return
                     finally:
                         portal.close()
+                    enrollment = portal.enrollment
+                    portal = None
                 else:
                     provisioning = Provisioner(device_id, DEVICE_NAME, setup_key)
                     print("Wi-Fi setup available over Bluetooth")
@@ -422,7 +435,7 @@ def run():
                 return
             wlan.active(True)
             wlan.connect(ssid, getattr(kontur_config, "WIFI_PASSWORD", ""))
-        cloud = start_cloud(manifest)
+        cloud = start_cloud(manifest, enrollment)
         print("Starting Wi-Fi services for %s" % device_id)
         retry_at = ticks_ms()
         waiting_at = ticks_add(retry_at, 15000)
@@ -474,7 +487,7 @@ def run():
                 except OSError:
                     pass
                 else:
-                    serve_client(client, manifest, expected_token, indicator, gateway)
+                    serve_client(client, manifest, expected_token, indicator, gateway, enrollment)
             sleep_ms(10)
     finally:
         indicator.reset()

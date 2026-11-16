@@ -881,18 +881,7 @@ async function transmit(device,capability,value,automatic=false) {
 
 function addDevice(room) {
   if (konturHome.cloud()) {
-    if (sharedHome.connected()) {
-      if (sharedHome.canEdit()) chooseSetupMethod(room);
-      return;
-    }
-    const content = modal(t('Подключение прибора'));
-    content.append(node('p','sub',t('Войди в аккаунт и создай дом, чтобы подключить новый прибор.')));
-    const actions = node('div','actions');
-    actions.append(button(t('Открыть профиль'),'primary',() => {
-      dialog.close();
-      navigate('profile');
-    }));
-    content.append(actions);
+    if (sharedHome.canEdit()) chooseSetupMethod(room);
     return;
   }
   const content = modal(t('Подключение прибора'));
@@ -939,37 +928,45 @@ function chooseSetupMethod(room) {
   const controls = node('div','actions');
   const feedback = node('p','field-note');
   feedback.setAttribute('role','status');
-  const start = button(t('Настроить через Wi-Fi'),'primary',async () => {
-    if (start.disabled) return;
-    start.disabled = true;
-    feedback.textContent = t('Готовим ссылку настройки…');
-    try {
-      const link = await sharedHome.startEnrollment(room);
-      if (dialog.open && start.isConnected) wifiSetupInstructions(link);
-    } catch (error) {
-      if (dialog.open && start.isConnected) feedback.textContent = sharedHome.message(error);
-    } finally {
-      start.disabled = false;
-    }
-  });
+  const start = button(t('Настроить через Wi-Fi'),'primary',() =>
+    wifiSetupInstructions(konturEnrollment.portal(undefined,konturI18n.getLocale()),true));
   controls.append(start);
-  if (konturProvisioning.available()) {
-    controls.append(button(t('Найти по Bluetooth'),'ghost',() => provisionCloudDevice(room)));
+  if (sharedHome.connected()) {
+    const signed = button(t('Выбрать комнату заранее'),'ghost',async () => {
+      if (signed.disabled) return;
+      signed.disabled = true;
+      feedback.textContent = t('Готовим ссылку настройки…');
+      try {
+        const link = await sharedHome.startEnrollment(room);
+        if (dialog.open && signed.isConnected) wifiSetupInstructions(link);
+      } catch (error) {
+        if (dialog.open && signed.isConnected) feedback.textContent = sharedHome.message(error);
+      } finally {
+        signed.disabled = false;
+      }
+    });
+    controls.append(signed);
+    if (konturProvisioning.available()) {
+      controls.append(button(t('Найти по Bluetooth'),'ghost',() => provisionCloudDevice(room)));
+    }
+    controls.append(button(t('Привязать уже настроенный прибор'),'ghost',() => claimCloudDevice(room)));
   }
-  controls.append(button(t('Привязать уже настроенный прибор'),'ghost',() => claimCloudDevice(room)),
-    button(t('Закрыть'),'ghost',() => dialog.close()));
+  controls.append(button(t('Закрыть'),'ghost',() => dialog.close()));
   content.append(node('p','sub',t('Включи новый прибор. Его временная сеть поможет подключить его к домашнему Wi-Fi.')),
     feedback,controls);
   start.focus();
 }
 
-function wifiSetupInstructions(link) {
+function wifiSetupInstructions(link,standalone=false) {
   const content = modal(t('Настройка через Wi-Fi'));
   const steps = node('ol','enrollment-steps');
   for (const text of [
     'Открой настройки Wi-Fi и подключись к сети Kontur-XXXXXX. Пароль этой сети указан на карточке прибора.',
     'Если телефон сообщает, что в сети нет интернета, выбери «Использовать без интернета».',
-    'Вернись в эту вкладку и открой страницу настройки. Выбери прибор, затем введи имя и пароль домашней сети.'
+    standalone
+      ? 'Вернись в Safari и открой http://192.168.4.1/. Сайт «Контур» на этом шаге не нужен.'
+      : 'Вернись в эту вкладку и открой страницу настройки.',
+    'Выбери прибор, затем введи имя и пароль домашней сети.'
   ]) steps.append(node('li','',t(text)));
   const portal = node('a','primary enrollment-link',t('Открыть страницу прибора'));
   portal.href = link;
@@ -978,6 +975,7 @@ function wifiSetupInstructions(link) {
   const controls = node('div','actions');
   controls.append(portal,button(t('Закрыть'),'ghost',() => dialog.close()));
   content.append(steps,node('p','field-note',t('Когда прибор подключится, телефон обычно сам вернётся в интернет. Если этого не произошло, переключись обратно на домашний Wi-Fi.')),
+    ...(standalone ? [node('p','field-note',t('Войди в «Контур», когда появится интернет, и выбери дом и комнату для прибора.'))] : []),
     controls);
   portal.focus();
 }
