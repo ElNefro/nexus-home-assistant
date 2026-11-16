@@ -125,6 +125,7 @@ function openDetail(type,id,room='') {
 }
 function syncRoute() {
   const route = new URLSearchParams(location.hash.slice(1));
+  sharedHome.captureEnrollment(route);
   sharedHome.captureInvite(route);
   page = Object.prototype.hasOwnProperty.call(pages,route.get('page'))
     ? route.get('page') : route.has('invite') ? 'profile' : 'home';
@@ -312,9 +313,10 @@ function renderDevices() {
   const devices = roomDevices(room.id);
   return [
     heading(roomName(room),t('Приборы'),''),
+    sharedHome.enrollmentPanel(),
     sectionHead(t('Список приборов'),sharedHome.canEdit() ? button(t('＋ Добавить прибор'),'primary',() => addDevice(room)) : null),
     list(devices.map(device => deviceTile(device)),t('В этой комнате пока нет приборов.'))
-  ];
+  ].filter(Boolean);
 }
 function renderRooms() {
   const rooms = data.rooms.map(room => {
@@ -382,7 +384,7 @@ function renderProfile() {
 
 
   return [heading(t('Настройки аккаунта'),t('Профиль'),t('Имя и роль в доме')),
-    sharedHome.profile(),profile,preferences,sharedHome.canEdit() ? backup : null].filter(Boolean);
+    sharedHome.enrollmentPanel(),sharedHome.profile(),profile,preferences,sharedHome.canEdit() ? backup : null].filter(Boolean);
 }
 async function installApp() {
   try {
@@ -880,7 +882,7 @@ async function transmit(device,capability,value,automatic=false) {
 function addDevice(room) {
   if (konturHome.cloud()) {
     if (sharedHome.connected()) {
-      if (sharedHome.canEdit()) provisionCloudDevice(room);
+      if (sharedHome.canEdit()) chooseSetupMethod(room);
       return;
     }
     const content = modal(t('Подключение прибора'));
@@ -930,6 +932,54 @@ function addDevice(room) {
     sectionHead(t('Устройства в сети'),rescan),lanResults,actions);
   rescan.focus();
   scanLan();
+}
+
+function chooseSetupMethod(room) {
+  const content = modal(t('Подключение прибора'));
+  const controls = node('div','actions');
+  const feedback = node('p','field-note');
+  feedback.setAttribute('role','status');
+  const start = button(t('Настроить через Wi-Fi'),'primary',async () => {
+    if (start.disabled) return;
+    start.disabled = true;
+    feedback.textContent = t('Готовим ссылку настройки…');
+    try {
+      const link = await sharedHome.startEnrollment(room);
+      if (dialog.open && start.isConnected) wifiSetupInstructions(link);
+    } catch (error) {
+      if (dialog.open && start.isConnected) feedback.textContent = sharedHome.message(error);
+    } finally {
+      start.disabled = false;
+    }
+  });
+  controls.append(start);
+  if (konturProvisioning.available()) {
+    controls.append(button(t('Найти по Bluetooth'),'ghost',() => provisionCloudDevice(room)));
+  }
+  controls.append(button(t('Привязать уже настроенный прибор'),'ghost',() => claimCloudDevice(room)),
+    button(t('Закрыть'),'ghost',() => dialog.close()));
+  content.append(node('p','sub',t('Включи новый прибор. Его временная сеть поможет подключить его к домашнему Wi-Fi.')),
+    feedback,controls);
+  start.focus();
+}
+
+function wifiSetupInstructions(link) {
+  const content = modal(t('Настройка через Wi-Fi'));
+  const steps = node('ol','enrollment-steps');
+  for (const text of [
+    'Открой настройки Wi-Fi и подключись к сети Kontur-XXXXXX. Пароль этой сети указан на карточке прибора.',
+    'Если телефон сообщает, что в сети нет интернета, выбери «Использовать без интернета».',
+    'Вернись в эту вкладку и открой страницу настройки. Выбери прибор, затем введи имя и пароль домашней сети.'
+  ]) steps.append(node('li','',t(text)));
+  const portal = node('a','primary enrollment-link',t('Открыть страницу прибора'));
+  portal.href = link;
+  portal.target = '_self';
+  portal.rel = 'noreferrer';
+  const controls = node('div','actions');
+  controls.append(portal,button(t('Закрыть'),'ghost',() => dialog.close()));
+  content.append(steps,node('p','field-note',t('Когда прибор подключится, телефон обычно сам вернётся в интернет. Если этого не произошло, переключись обратно на домашний Wi-Fi.')),
+    controls);
+  portal.focus();
 }
 
 function provisionCloudDevice(room) {

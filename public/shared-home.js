@@ -14,6 +14,9 @@ const sharedHome = (() => {
   let currentInvite = '';
   const invitationCode = /^[A-Za-z0-9_-]{32}$/;
   let pendingInvite = '';
+  let finishingEnrollment;
+  let checkingEnrollmentSession = false;
+  let enrollmentNotice = '';
 
   function message(error) {
     const errors = {
@@ -38,7 +41,11 @@ const sharedHome = (() => {
       'push-unavailable':'На локальном сервере недоступна отправка push.',
       'home-index-in-use':'Этот код дома уже используется.',
       'invalid-home-index':'Код дома должен содержать от 3 до 32 латинских букв, цифр или дефисов.',
-      'invalid-member-prefix':'Введи семейный префикс длиной до 24 символов.'
+      'invalid-member-prefix':'Введи семейный префикс длиной до 24 символов.',
+      'invalid-enrollment':'Ссылка настройки недействительна. Начни настройку прибора заново.',
+      'enrollment-expired':'Время настройки вышло. Начни настройку прибора заново.',
+      'enrollment-unavailable':'Настройка через временную сеть пока недоступна.',
+      'device-not-found':'Сервер не нашёл этот прибор. Проверь, что выбран нужный прибор.'
     };
     return t(errors[error.message] ?? 'Не удалось выполнить действие. Проверь подключение и введённые данные.');
   }
@@ -57,6 +64,14 @@ const sharedHome = (() => {
     if (!invitationCode.test(code) || code === pendingInvite) return;
     pendingInvite = code;
     if (user) joinWithCode(code).catch(error => status(message(error)));
+  }
+
+  function captureEnrollment(params) {
+    if (!konturHome.cloud()) return;
+    const result = konturEnrollment.capture(params);
+    if (!result) return;
+    enrollmentNotice = result === 'invalid-enrollment' ? message(Error(result)) : '';
+    if (result === 'captured' && user) void finishEnrollment();
   }
 
   function clearInvite(code) {
@@ -129,13 +144,18 @@ const sharedHome = (() => {
       let last;
       try { last = localStorage.getItem('kontur-preview-home'); } catch {}
       const linkedHome = new URLSearchParams(location.hash.slice(1)).get('homeId');
-      if (user && pendingInvite) await joinWithCode(pendingInvite);
+      if (user && konturEnrollment.pending && konturHome.cloud()) await finishEnrollment();
+      else if (user && pendingInvite) await joinWithCode(pendingInvite);
       else if (user && homes.some(item => item.id === linkedHome)) await open(linkedHome);
       else if (user && homes.some(item => item.id === last)) await open(last);
       else if (user && homes.length === 1) await open(homes[0].id);
       else render();
     } catch (error) {
       if (pendingInvite) status(message(error));
+      if (konturEnrollment.pending && konturHome.cloud()) {
+        enrollmentNotice = message(error);
+        render();
+      }
     }
   }
 
@@ -218,6 +238,106 @@ const sharedHome = (() => {
     status(t('Прибор подключён к комнате «{name}».',{name:roomName(room)}));
   }
 
+  async function startEnrollment(room) {
+    if (!konturHome.cloud() || !home?.id || !canEdit()) throw Error('home-access-denied');
+    const {ticket} = await api('home/cloud/enroll/start',{homeId:home.id,roomId:room.id});
+    return konturEnrollment.portal(ticket,konturI18n.getLocale());
+  }
+
+  async function finishEnrollment() {
+    const record = konturEnrollment.pending;
+    if (!konturHome.cloud() || !user || !record || finishingEnrollment) return;
+    finishingEnrollment = record;
+    enrollmentNotice = '';
+    if (!dialog.open) render();
+    const owner = user.id;
+    const stillCurrent = () => user?.id === owner && konturEnrollment.pending === record;
+    try {
+      for (let attempt = 0; attempt < 6; attempt++) {
+        if (!stillCurrent()) return;
+        try {
+          const snapshot = await api('home/cloud/enroll/finish',{
+            ticket:record.ticket,deviceId:record.deviceId,proof:record.proof
+          });
+          if (!stillCurrent()) return;
+          konturEnrollment.clear(record);
+          if (!homes.some(item => item.id === snapshot.id)) {
+            homes.push({id:snapshot.id,name:snapshot.name,role:snapshot.role,index:snapshot.index});
+          }
+          openSnapshot(snapshot);
+          const device = data.devices.find(item => item.id === 'cloud-' + record.deviceId);
+          if (device) roomId = device.roomId;
+          enrollmentNotice = t('Прибор добавлен и теперь доступен в доме.');
+          if (page === 'profile' && !dialog.open) navigate('devices');
+          return;
+        } catch (error) {
+          if (error.message !== 'device-offline' || attempt === 5) throw error;
+          await new Promise(resolve => setTimeout(resolve,3000));
+        }
+      }
+    } catch (error) {
+      if (!stillCurrent()) return;
+      if (error.message === 'sign-in-required') {
+        leave();
+        useAccount({user:null,homes:[]});
+      }
+      if (['invalid-enrollment','enrollment-expired','device-owned','device-not-found'].includes(error.message)) {
+        konturEnrollment.clear(record);
+      }
+      enrollmentNotice = error.message === 'device-offline'
+        ? t('Прибор ещё не вышел в интернет. Проверь подключение телефона, подожди и повтори привязку.')
+        : message(error);
+    } finally {
+      finishingEnrollment = undefined;
+      render();
+      if (konturEnrollment.pending && konturEnrollment.pending !== record) void finishEnrollment();
+    }
+  }
+
+  function enrollmentPanel() {
+    if (!konturHome.cloud()) return null;
+    const record = konturEnrollment.pending;
+    if (!record && !enrollmentNotice) return null;
+    const panel = node('section','panel profile-section');
+    panel.append(node('h2','',t('Настройка прибора')));
+    const feedback = node('p','sub',enrollmentNotice || t(checkingEnrollmentSession ? 'Проверяем вход в аккаунт…'
+      : !user ? 'Войди в аккаунт владельца дома, чтобы завершить привязку.'
+      : 'Ждём подключения прибора к интернету…'));
+    feedback.setAttribute('role','status');
+    panel.append(feedback);
+    if (finishingEnrollment || checkingEnrollmentSession) return panel;
+    const actions = node('div','row-buttons');
+    if (record && (user || enrollmentNotice)) actions.append(button(t('Повторить привязку'),'primary',retryEnrollment));
+    if (record && !user && page !== 'profile') {
+      actions.append(button(t('Открыть профиль'),'primary',() => navigate('profile')));
+    }
+    actions.append(button(t('Закрыть'),'ghost',() => {
+      konturEnrollment.clear(record);
+      enrollmentNotice = '';
+      render();
+    }));
+    panel.append(actions);
+    return panel;
+  }
+
+  async function retryEnrollment() {
+    if (user) return finishEnrollment();
+    const record = konturEnrollment.pending;
+    if (!record || checkingEnrollmentSession) return;
+    checkingEnrollmentSession = true;
+    enrollmentNotice = '';
+    render();
+    try {
+      await session();
+    } catch (error) {
+      if (konturEnrollment.pending === record) enrollmentNotice = message(error);
+    } finally {
+      checkingEnrollmentSession = false;
+      render();
+    }
+    if (user && konturEnrollment.pending === record) return finishEnrollment();
+  }
+
   function fieldInput(form,error,caption,id,type='text',options={}) {
     const input = node('input');
     input.type = type;
@@ -285,7 +405,9 @@ const sharedHome = (() => {
       const result = await api('account/' + mode,values);
       useAccount(result);
       dialog.close();
-      if (pendingInvite) {
+      if (konturEnrollment.pending && konturHome.cloud()) {
+        void finishEnrollment();
+      } else if (pendingInvite) {
         try { await joinWithCode(pendingInvite); }
         catch (error) { status(message(error)); }
       } else if (homes.length === 1) {
@@ -512,6 +634,6 @@ const sharedHome = (() => {
     return section;
   }
 
-  return {setup,profile,pair,claim,route,captureInvite,message,connected,canEdit,save,command,schedule,
+  return {setup,profile,pair,claim,startEnrollment,captureEnrollment,enrollmentPanel,route,captureInvite,message,connected,canEdit,save,command,schedule,
     get home() { return home; },get user() { return user; }};
 })();

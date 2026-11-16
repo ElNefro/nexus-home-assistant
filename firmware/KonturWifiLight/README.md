@@ -25,16 +25,18 @@ GPIO23 ─── [330 Ω] ─── анод (+) LED катод (−) ─── 
 Прошивка в папке [`micropython`](./micropython) передаёт имя и кнопку «Включить». Локальный мост находит плату через UDP на порту `42424` в домашней сети. Добавление с верным кодом запускает один сигнал; обновление списка и чтение состояния сигналов не запускают.
 
 1. Для классического ESP32 с 4 МБ флеш-памяти используй образ [MicroPython ESP32_GENERIC](https://micropython.org/download/ESP32_GENERIC/). Если на плате стояла другая прошивка, сохрани её перед заменой. Сотри флеш-память согласно инструкции MicroPython и запиши официальный образ по адресу `0x1000`.
-2. Скопируй `kontur_config.example.py` в `kontur_config.py`. Заполни имя сети, пароль и случайный токен. Укажи вывод управляемого индикатора в `LED_GPIO`, а если индикатор загорается при низком уровне, задай `LED_ACTIVE_LOW = True`. Например, на DOIT ESP32 DevKit V1 встроенный светодиод подключён к `GPIO2`. Индикатор питания оригинальной DevKitC V4 подключён к питанию платы. [DOIT ESP32 DevKit V1 в Arduino-ESP32](https://github.com/espressif/arduino-esp32/blob/master/variants/doitESP32devkitV1/pins_arduino.h) · [Схема Espressif DevKitC V4](https://dl.espressif.cn/dl/schematics/esp32_devkitc_v4_sch.pdf)
+2. Скопируй `kontur_config.example.py` в `kontur_config.py`. Укажи `DEVICE_TOKEN` для управления по сети, 64-символьный шестнадцатеричный `SETUP_KEY` и отдельный уникальный `SETUP_AP_PASSWORD` для временной сети `Kontur-…`. Последние шесть символов имени сети совпадают с последними шестью символами идентификатора прибора. Домашняя сеть задаётся при подключении к «Контуру» и сохраняется только после успешного подключения. Укажи вывод индикатора в `LED_GPIO`, а если он загорается при низком уровне, задай `LED_ACTIVE_LOW = True`. Например, на DOIT ESP32 DevKit V1 встроенный светодиод подключён к `GPIO2`. Индикатор питания оригинальной DevKitC V4 подключён к питанию платы. [DOIT ESP32 DevKit V1 в Arduino-ESP32](https://github.com/espressif/arduino-esp32/blob/master/variants/doitESP32devkitV1/pins_arduino.h) · [Схема Espressif DevKitC V4](https://dl.espressif.cn/dl/schematics/esp32_devkitc_v4_sch.pdf)
 3. Установи [mpremote](https://docs.micropython.org/en/latest/reference/mpremote.html). Из папки `micropython` запиши файлы и перезагрузи плату (замени `COM6`, если порт другой):
 
    ```powershell
    py -m mpremote connect COM6 fs cp kontur_config.py :kontur_config.py
+   py -m mpremote connect COM6 fs cp kontur_provision.py :kontur_provision.py
+   py -m mpremote connect COM6 fs cp kontur_portal.py :kontur_portal.py
    py -m mpremote connect COM6 fs cp main.py :main.py
    py -m mpremote connect COM6 reset
    ```
 
-4. В локальном «Контуре» добавь светильник через список приборов Wi-Fi. Введи значение `DEVICE_TOKEN` и посмотри на индикатор. Затем открой карточку светильника и нажми «Включить». Код в мониторе порта на 115200 бод сообщает о запрошенном числе миганий.
+4. Открой [официальную панель](https://nexus-home-assistant.onrender.com/#page=devices), выбери комнату и нажми **Добавить прибор**. Подключи телефон к `Kontur-…` с паролем настройки и открой страницу прибора из той же вкладки. После подключения к домашней сети прибор добавится в комнату, когда его увидит облачный сервер. Для отдельной локальной панели используй поиск в домашней сети и `DEVICE_TOKEN`.
 
 ## Проверка Arduino
 

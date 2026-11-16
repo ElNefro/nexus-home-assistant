@@ -1,7 +1,9 @@
 """Small Render relay for one ESP32 and one authorized owner."""
+from base64 import urlsafe_b64decode, urlsafe_b64encode
+from binascii import Error as Base64Error
 from dataclasses import dataclass
 from hashlib import sha256
-from hmac import compare_digest
+from hmac import compare_digest, digest as hmac_digest
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
@@ -12,7 +14,7 @@ import secrets
 from threading import Lock, BoundedSemaphore
 import time
 
-from server_accounts import AccountError, Accounts, SESSION_COOKIE
+from server_accounts import AccountError, Accounts, SESSION_COOKIE, identifier
 
 
 PANEL_ORIGIN = "https://nexus-home-assistant.onrender.com"
@@ -28,6 +30,11 @@ DEVICE_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}", re.ASCII)
 COMMAND_ID = re.compile(r"[A-Za-z0-9_-]{24}", re.ASCII)
 TOKEN = re.compile(r"Bearer ([A-Za-z0-9_-]{32,128})", re.ASCII)
 HASH = re.compile(r"[A-Fa-f0-9]{64}", re.ASCII)
+AP_PROOF = re.compile(r"[a-f0-9]{64}", re.ASCII)
+AP_TICKET = re.compile(r"([A-Za-z0-9_-]{1,320})\.([A-Za-z0-9_-]{43})", re.ASCII)
+AP_NONCE = re.compile(r"[A-Za-z0-9_-]{22}", re.ASCII)
+AP_TTL = 15 * 60
+AP_REPLAY_LIMIT = 1024
 
 
 class RelayError(Exception):
@@ -94,6 +101,51 @@ def authenticate(header, expected):
     return bool(match and compare_digest(sha256(match[1].encode("ascii")).digest(), expected))
 
 
+@dataclass(frozen=True)
+class Enrollment:
+    owner: str
+    home: str
+    room: str
+    expiry: int
+    nonce: str
+
+
+def b64url(data):
+    return urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def enrollment_signature(config, payload):
+    key = hmac_digest(config.owner_hash, b"kontur:ap-ticket:v1", "sha256")
+    return b64url(hmac_digest(key, payload.encode("ascii"), "sha256"))
+
+
+def issue_enrollment_ticket(config, owner, home, room, now):
+    # Compact positional fields keep even the longest supported room identifier within the ticket limit.
+    data = json.dumps([owner, home, room, now + AP_TTL, secrets.token_urlsafe(16)], separators=(",", ":"))
+    payload = b64url(data.encode("ascii"))
+    if len(payload) > 320:
+        raise RelayError(400, "invalid-enrollment")
+    return payload + "." + enrollment_signature(config, payload)
+
+
+def verify_enrollment_ticket(config, ticket, now):
+    match = AP_TICKET.fullmatch(ticket) if isinstance(ticket, str) else None
+    if match is None or not compare_digest(match[2], enrollment_signature(config, match[1])):
+        raise RelayError(400, "invalid-enrollment")
+    try:
+        encoded = match[1]
+        raw = urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+        owner, home, room, expiry, nonce = json.loads(raw.decode("ascii"))
+    except (Base64Error, ValueError, TypeError) as exc:
+        raise RelayError(400, "invalid-enrollment") from exc
+    if (not all(map(identifier, (owner, home, room))) or type(expiry) is not int
+            or not isinstance(nonce, str) or not AP_NONCE.fullmatch(nonce)):
+        raise RelayError(400, "invalid-enrollment")
+    if expiry <= now:
+        raise RelayError(410, "enrollment-expired")
+    return Enrollment(owner, home, room, expiry, nonce)
+
+
 def label(value):
     return (isinstance(value, str) and 0 < len(value) <= 60 and value.strip()
             and not any(ord(char) < 32 or 0xd800 <= ord(char) <= 0xdfff for char in value))
@@ -154,6 +206,8 @@ class Relay:
         self.manifest = None
         self.last_seen = None
         self.commands = {}
+        self.enrollment_lock = Lock()
+        self.used_enrollments = {}
 
     def online(self, now):
         return self.last_seen is not None and now - self.last_seen < ONLINE_WINDOW
@@ -233,7 +287,8 @@ HOME_ROUTES = {
     "/api/account/session": "GET",
     **{f"/api/account/{action}": "POST" for action in ("register", "login", "logout", "recover", "profile")},
     **{f"/api/home/{action}": "POST" for action in (
-        "create", "get", "save", "command", "schedule", "invite", "join", "revoke", "member-prefix", "cloud/claim"
+        "create", "get", "save", "command", "schedule", "invite", "join", "revoke", "member-prefix",
+        "cloud/claim", "cloud/enroll/start", "cloud/enroll/finish"
     )},
 }
 
@@ -249,6 +304,62 @@ def with_cloud_presence(snapshot, relay, accounts):
             device["online"] = bool(record and record["online"] and device["id"] == "cloud-" + relay.device_id
                                     and accounts.cloud_owner(device["id"]) == snapshot.get("id"))
     return snapshot
+
+
+def require_enrollment_room(accounts, cookie, home_id, room_id):
+    status, snapshot, _ = accounts.route("POST", "/api/home/get", {"homeId": home_id}, cookie)
+    if status != 200:
+        raise RelayError(status, snapshot["error"])
+    if not identifier(room_id) or not any(room["id"] == room_id for room in snapshot["state"]["rooms"]):
+        raise RelayError(400, "invalid-enrollment")
+
+
+def start_enrollment(accounts, cookie, config, body):
+    home_id, room_id = body.get("homeId"), body.get("roomId")
+    actor = accounts.authorize(cookie, home_id, owner=True)
+    if config.setup_hash is None:
+        raise RelayError(503, "enrollment-unavailable")
+    require_enrollment_room(accounts, cookie, home_id, room_id)
+    return {"ticket": issue_enrollment_ticket(config, actor["userId"], home_id, room_id, int(time.time()))}
+
+
+def finish_enrollment(accounts, cookie, config, relay, body):
+    ticket, device_id, proof = body.get("ticket"), body.get("deviceId"), body.get("proof")
+    now = int(time.time())
+    claims = verify_enrollment_ticket(config, ticket, now)
+    actor = accounts.authorize(cookie, claims.home, owner=True)
+    if actor["userId"] != claims.owner:
+        raise RelayError(403, "invalid-enrollment")
+    if device_id != config.device_id:
+        raise RelayError(404, "device-not-found")
+    if config.setup_hash is None:
+        raise RelayError(503, "enrollment-unavailable")
+    if not isinstance(proof, str) or not AP_PROOF.fullmatch(proof):
+        raise RelayError(400, "invalid-enrollment")
+    message = ("kontur:ap:" + ticket + ":" + device_id).encode("ascii")
+    expected = hmac_digest(config.setup_hash, message, "sha256").hex()
+    if not compare_digest(proof, expected):
+        raise RelayError(400, "invalid-enrollment")
+
+    with relay.enrollment_lock:
+        now = int(time.time())
+        if claims.expiry <= now:
+            raise RelayError(410, "enrollment-expired")
+        relay.used_enrollments = {nonce: expiry for nonce, expiry in relay.used_enrollments.items() if expiry > now}
+        if claims.nonce in relay.used_enrollments:
+            # A lost response can be retried without overwriting a newer room or undoing removal.
+            if accounts.cloud_owner("cloud-" + device_id) != claims.home:
+                raise RelayError(409, "invalid-enrollment")
+            return claims.home
+        if len(relay.used_enrollments) >= AP_REPLAY_LIMIT:
+            raise RelayError(429, "try-again-later")
+        record = live_device(relay)
+        if not record or not record["online"] or record["manifest"]["id"] != device_id:
+            raise RelayError(409, "device-offline")
+        require_enrollment_room(accounts, cookie, claims.home, claims.room)
+        accounts.bind_cloud_device(claims.home, record["manifest"], claims.room)
+        relay.used_enrollments[claims.nonce] = claims.expiry
+        return claims.home
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -310,7 +421,12 @@ class Handler(BaseHTTPRequestHandler):
         body = self.read_json(MAX_HOME_BODY if path in ("/api/home/create", "/api/home/save") else MAX_DEVICE_BODY) if self.command == "POST" else None
         if path == "/api/home/create" and "index" not in body:
             raise RelayError(400, "invalid-home-index")
-        if path == "/api/home/cloud/claim":
+        if path == "/api/home/cloud/enroll/start":
+            return 200, start_enrollment(accounts, cookie, config, body)
+        if path == "/api/home/cloud/enroll/finish":
+            body = {"homeId": finish_enrollment(accounts, cookie, config, relay, body)}
+            path = "/api/home/get"
+        elif path == "/api/home/cloud/claim":
             home_id = body.get("homeId")
             accounts.authorize(cookie, home_id, owner=True)
             key = body.get("setupKey")

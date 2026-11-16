@@ -2,14 +2,21 @@ import io
 import json
 import unittest
 from hashlib import sha256
+from hmac import digest as hmac_digest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from threading import BoundedSemaphore
 from types import SimpleNamespace
 
-from cloud_server import Config, Handler, MAX_PENDING, PANEL_ORIGIN, Relay, RelayError
+from cloud_server import (Config, Handler, MAX_PENDING, PANEL_ORIGIN, Relay, RelayError,
+                          b64url, issue_enrollment_ticket, verify_enrollment_ticket)
+from server_accounts import Accounts
 
 
 DEVICE_ID = "light-0123456789ab"
 OWNER = "a" * 43
 DEVICE = "b" * 43
+SETUP = "c" * 64
 MANIFEST = {
     "schemaVersion": 1, "id": DEVICE_ID, "kind": "light", "name": "Test light",
     "capabilities": [{"id": "power", "type": "switch", "label": "Pulse", "momentary": True}]
@@ -109,7 +116,7 @@ class RelayTest(unittest.TestCase):
             with self.assertRaisesRegex(RelayError,"invalid-command"):
                 self.relay.enqueue({"deviceId":DEVICE_ID,**command})
 
-    def request(self, method, path, *, bearer=None, origin=None, body=None, extra=None):
+    def request(self, method, path, *, bearer=None, origin=None, body=None, extra=None, server=None):
         headers = ["Host: relay.example.test"]
         if bearer:
             headers.append("Authorization: Bearer " + bearer)
@@ -124,7 +131,8 @@ class RelayTest(unittest.TestCase):
             headers.append("Content-Length: " + str(len(payload)))
         request = "\r\n".join([f"{method} {path} HTTP/1.1",*headers,"",""]).encode() + payload
         connection = Connection(request)
-        server = SimpleNamespace(config=Config.from_env(config_env()),relay=self.relay)
+        if server is None:
+            server = SimpleNamespace(config=Config.from_env(config_env()),relay=self.relay)
         QuietHandler(connection,("127.0.0.1",1234),server)
         message, content = connection.outgoing.getvalue().split(b"\r\n\r\n",1)
         return int(message.split()[1]),message.decode(),json.loads(content) if content else None
@@ -164,6 +172,85 @@ class RelayTest(unittest.TestCase):
         device_request["results"] = [{"id":command_id,"ok":True}]
         self.request("POST",api + "/device/poll",bearer=DEVICE,body=device_request)
         self.assertEqual(self.request("GET",api + "/commands/" + command_id,bearer=OWNER)[2],{"status":"applied"})
+
+    def test_ap_ticket_limits_expiry_and_signing_key(self):
+        config = Config.from_env({**config_env(),"KONTUR_SETUP_SHA256":sha256(SETUP.encode()).hexdigest()})
+        ticket = issue_enrollment_ticket(config,"a"*32,"b"*32,"x"*128,1_800_000_000)
+        payload, signature = ticket.split(".")
+        self.assertLessEqual(len(payload),320)
+        self.assertEqual(len(signature),43)
+        claims = verify_enrollment_ticket(config,ticket,1_800_000_899)
+        self.assertEqual(claims.room,"x"*128)
+        with self.assertRaisesRegex(RelayError,"enrollment-expired"):
+            verify_enrollment_ticket(config,ticket,1_800_000_900)
+        wrong_signature = b64url(hmac_digest(config.setup_hash,payload.encode("ascii"),"sha256"))
+        with self.assertRaisesRegex(RelayError,"invalid-enrollment"):
+            verify_enrollment_ticket(config,payload + "." + wrong_signature,1_800_000_100)
+
+    def test_ap_enrollment_requires_owner_board_proof_and_replays_without_rebinding(self):
+        with TemporaryDirectory() as directory:
+            server = SimpleNamespace(
+                config=Config.from_env({**config_env(),"KONTUR_SETUP_SHA256":sha256(SETUP.encode()).hexdigest()}),
+                relay=self.relay, accounts=Accounts(Path(directory)/"homes.sqlite3"),
+                authentication_slots=BoundedSemaphore(2)
+            )
+
+            def post(route, body, bearer=None):
+                status, _, data = self.request(
+                    "POST","/api/" + route,bearer=bearer,origin=PANEL_ORIGIN,body=body,server=server
+                )
+                return status,data
+
+            def register(email, name):
+                code,data = post("account/register",{"email":email,"name":name,"password":"password for test"})
+                self.assertEqual(code,201)
+                return data["sessionToken"]
+
+            owner = register("owner@example.test","Owner")
+            guest = register("guest@example.test","Guest")
+            code,home = post("home/create",{"name":"Home","index":"test-home","state":{
+                "rooms":[{"id":"living","name":"Living"},{"id":"study","name":"Study"}],"devices":[]
+            }},owner)
+            self.assertEqual(code,200)
+            home_id = home["id"]
+            _,invite = post("home/invite",{"homeId":home_id},owner)
+            self.assertEqual(post("home/join",invite,guest)[0],200)
+            start = "home/cloud/enroll/start"
+            finish = "home/cloud/enroll/finish"
+            request = {"homeId":home_id,"roomId":"living"}
+            self.assertEqual(post(start,request)[0],401)
+            self.assertEqual(post(start,request,guest)[0],403)
+            self.assertEqual(post(start,{**request,"roomId":"missing"},owner)[0],400)
+            status, result = post(start,request,owner)
+            self.assertEqual(status,200)
+            ticket = result["ticket"]
+            message = ("kontur:ap:" + ticket + ":" + DEVICE_ID).encode("ascii")
+            proof = hmac_digest(server.config.setup_hash,message,"sha256").hex()
+            claim = {"ticket":ticket,"deviceId":DEVICE_ID,"proof":proof}
+            self.assertEqual(post(finish,claim,guest)[0],403)
+            self.assertEqual(post(finish,{**claim,"proof":"0"*64},owner),(400,{"error":"invalid-enrollment"}))
+            self.assertEqual(post(finish,claim,owner),(409,{"error":"device-offline"}))
+            self.poll()
+            status, claimed = post(finish,claim,owner)
+            self.assertEqual(status,200)
+            self.assertEqual(claimed["state"]["devices"][0]["roomId"],"living")
+
+            claimed["state"]["devices"][0]["roomId"] = "study"
+            status, moved = post("home/save",{
+                "homeId":home_id,"revision":claimed["revision"],"state":claimed["state"]
+            },owner)
+            self.assertEqual(status,200)
+            self.now = 20
+            status, replay = post(finish,claim,owner)
+            self.assertEqual(status,200)
+            self.assertEqual(replay["revision"],moved["revision"])
+            self.assertEqual(replay["state"]["devices"][0]["roomId"],"study")
+            self.assertFalse(replay["state"]["devices"][0]["online"])
+            replay["state"]["devices"] = []
+            self.assertEqual(post("home/save",{
+                "homeId":home_id,"revision":replay["revision"],"state":replay["state"]
+            },owner)[0],200)
+            self.assertEqual(post(finish,claim,owner),(409,{"error":"invalid-enrollment"}))
 
 
 if __name__ == "__main__":

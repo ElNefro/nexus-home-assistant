@@ -589,6 +589,9 @@ textarea { min-height: 140px; resize: vertical; font-family: ui-monospace, monos
 .detail-page [role=status]:empty { display: none; }
 .detail-page [role=status] { margin-block: 10px 0; }
 .shared-panel .line { gap: .65rem; flex-wrap: wrap; }
+.enrollment-steps { padding-inline-start: 1.4rem; }
+.enrollment-steps li + li { margin-block-start: .65rem; }
+.enrollment-link { display: inline-flex; align-items: center; text-decoration: none; }
 .shared-check { display: flex; align-items: center; gap: .65rem; min-height: 44px; }
 .recovery-code { display:block; overflow-wrap:anywhere; padding:.7rem; margin:.6rem 0; user-select:all; }
 dialog input[type=email],dialog input[type=password] { width:100%; }

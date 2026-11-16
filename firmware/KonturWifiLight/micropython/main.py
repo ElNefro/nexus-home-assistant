@@ -392,10 +392,24 @@ def run():
             credentials = load_wifi()
             if credentials is None:
                 wlan.active(False)
-                provisioning = Provisioner(device_id, DEVICE_NAME, setup_key)
-                print("Wi-Fi setup available over Bluetooth")
-                while not provisioning.poll(wlan):
-                    sleep_ms(20)
+                ap_password = getattr(kontur_config, "SETUP_AP_PASSWORD", "")
+                if ap_password:
+                    from kontur_portal import Portal, PortalExpired
+                    portal = Portal(device_id, DEVICE_NAME, setup_key, ap_password)
+                    print("Wi-Fi setup hotspot:", portal.ssid, "at http://192.168.4.1/")
+                    try:
+                        while not portal.poll(wlan):
+                            sleep_ms(20)
+                    except PortalExpired:
+                        print("Wi-Fi setup hotspot expired. Power-cycle the board to retry.")
+                        return
+                    finally:
+                        portal.close()
+                else:
+                    provisioning = Provisioner(device_id, DEVICE_NAME, setup_key)
+                    print("Wi-Fi setup available over Bluetooth")
+                    while not provisioning.poll(wlan):
+                        sleep_ms(20)
                 print("Wi-Fi setup completed")
             else:
                 wlan.active(True)
