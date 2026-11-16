@@ -12,7 +12,7 @@
   });
 
   function autoMetric(device) {
-    return Object.hasOwn(automatic,device?.kind) ? automatic[device.kind].metric : undefined;
+    return Object.prototype.hasOwnProperty.call(automatic,device?.kind) ? automatic[device.kind].metric : undefined;
   }
 
   function supportsMode(device,mode) {

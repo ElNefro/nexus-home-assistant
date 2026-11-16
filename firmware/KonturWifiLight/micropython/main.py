@@ -365,9 +365,9 @@ def run():
         print("Set LED_GPIO and LED_ACTIVE_LOW for your onboard ESP32 LED")
         return
     device_token = kontur_config.DEVICE_TOKEN
-    if not kontur_config.WIFI_SSID or not 32 <= len(device_token) <= 128 or any(
+    if type(device_token) is not str or not 32 <= len(device_token) <= 128 or any(
             character not in TOKEN_CHARACTERS for character in device_token):
-        print("Configure Wi-Fi and a 32-128 character device token in kontur_config.py")
+        print("Configure a 32-128 character device token in kontur_config.py")
         return
     indicator = Indicator(led_gpio, led_active_low)
     # The original Arduino sketch formats its eFuse MAC as a little-endian integer.
@@ -380,19 +380,43 @@ def run():
     active_ip = None
     cloud = None
     gateway = None
+    provisioning = None
     if (getattr(kontur_config, "CLOUD_GATEWAY", False) is True
             and not getattr(kontur_config, "CLOUD_URL", "") and not getattr(kontur_config, "CLOUD_TOKEN", "")):
         gateway = GatewayCommands(indicator)
         print("Cloud gateway mode enabled")
-    retry_at = ticks_ms()
-    waiting_at = ticks_add(ticks_ms(), 15000)
     try:
-        wlan.active(True)
-        wlan.connect(kontur_config.WIFI_SSID, kontur_config.WIFI_PASSWORD)
+        setup_key = getattr(kontur_config, "SETUP_KEY", "")
+        if setup_key:
+            from kontur_provision import Provisioner, load_wifi
+            credentials = load_wifi()
+            if credentials is None:
+                wlan.active(False)
+                provisioning = Provisioner(device_id, DEVICE_NAME, setup_key)
+                print("Wi-Fi setup available over Bluetooth")
+                while not provisioning.poll(wlan):
+                    sleep_ms(20)
+                print("Wi-Fi setup completed")
+            else:
+                wlan.active(True)
+                wlan.connect(*credentials)
+            credentials = None
+        else:
+            ssid = getattr(kontur_config, "WIFI_SSID", "")
+            if not ssid:
+                print("Configure a setup key in kontur_config.py")
+                return
+            wlan.active(True)
+            wlan.connect(ssid, getattr(kontur_config, "WIFI_PASSWORD", ""))
         cloud = start_cloud(manifest)
-        print("Connecting %s to Wi-Fi" % device_id)
+        print("Starting Wi-Fi services for %s" % device_id)
+        retry_at = ticks_ms()
+        waiting_at = ticks_add(retry_at, 15000)
         while True:
             now = ticks_ms()
+            if provisioning is not None and provisioning.finished(now):
+                provisioning.close()
+                provisioning = None
             ip = wlan.ifconfig()[0] if wlan.isconnected() else None
             if ip != active_ip:
                 if cloud is not None:
@@ -440,6 +464,8 @@ def run():
             sleep_ms(10)
     finally:
         indicator.reset()
+        if provisioning is not None:
+            provisioning.close()
         if cloud is not None:
             cloud.close()
         if discovery is not None:

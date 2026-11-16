@@ -135,6 +135,71 @@ class AccountsTest(unittest.TestCase):
         self.assertFalse(self.accounts.has_device(home["id"],device["id"]))
         self.assertTrue(self.accounts.bind_device(second["id"],manifest,"living",{"power":False})["online"])
 
+    def test_home_index_is_case_insensitive_and_survives_restart(self):
+        _, owner = self.register("owner@example.test","Owner")
+        _, other = self.register("other@example.test","Other")
+        status, home, _ = self.request("/api/home/create",{"name":"Home","index":"house-12"},owner)
+        self.assertEqual(status,200)
+        self.assertEqual(home["index"],"HOUSE-12")
+        status, body, _ = self.request("/api/home/create",{"name":"Other","index":"House-12"},other)
+        self.assertEqual((status,body["error"]),(409,"home-index-in-use"))
+        self.assertEqual(self.request("/api/home/create",{"name":"Other","index":"house--12"},other)[0],400)
+        self.accounts = Accounts(self.file)
+        _, account, _ = self.request("/api/account/session",cookie=owner)
+        self.assertEqual(account["homes"],[{
+            "id":home["id"],"name":"Home","index":"HOUSE-12","role":"owner"
+        }])
+
+    def test_prefix_changes_display_without_granting_access(self):
+        _, owner = self.register("owner@example.test","Owner")
+        member, guest = self.register("guest@example.test","Guest")
+        _, home, _ = self.request("/api/home/create",{"name":"Home","index":"house-12"},owner)
+        _, invitation, _ = self.request("/api/home/invite",{"homeId":home["id"]},owner)
+        _, shared, _ = self.request("/api/home/join",invitation,guest)
+        self.assertEqual(shared["index"],"HOUSE-12")
+        self.assertEqual(shared["prefix"],"Семья")
+        self.assertEqual({row["role"]:row["prefix"] for row in shared["members"]},
+                         {"owner":"Админ","member":"Семья"})
+        payload = {"homeId":home["id"],"userId":member["user"]["id"],"prefix":"Админ"}
+        self.assertEqual(self.request("/api/home/member-prefix",payload,guest)[0],403)
+        status, changed, _ = self.request("/api/home/member-prefix",payload,owner)
+        self.assertEqual(status,200)
+        self.assertGreater(changed["revision"],shared["revision"])
+        _, fresh_guest, _ = self.request("/api/home/get",{"homeId":home["id"]},guest)
+        self.assertEqual(fresh_guest["prefix"],"Админ")
+        self.assertEqual(fresh_guest["role"],"member")
+        self.assertEqual(self.request("/api/home/invite",{"homeId":home["id"]},guest)[0],403)
+        _, reset, _ = self.request("/api/home/member-prefix",{**payload,"prefix":""},owner)
+        self.assertEqual(next(row for row in reset["members"] if row["role"] == "member")["prefix"],"Семья")
+
+    def test_cloud_binding_reserves_same_board_across_transports(self):
+        _, owner = self.register("owner@example.test","Owner")
+        _, other = self.register("other@example.test","Other")
+        _, first, _ = self.request("/api/home/create",{"name":"First"},owner)
+        _, second, _ = self.request("/api/home/create",{"name":"Second"},other)
+        manifest = {
+            "id":"test-lamp","name":"Desk lamp","kind":"light",
+            "capabilities":[{"id":"power","type":"switch","label":"Power","momentary":True}]
+        }
+        old_device = self.accounts.bind_device(first["id"],manifest,"living",{"power":False})
+        with self.assertRaisesRegex(AccountError,"device-owned"):
+            self.accounts.bind_cloud_device(second["id"],manifest,"living")
+        device = self.accounts.bind_cloud_device(first["id"],manifest,"living")
+        self.assertEqual(device["id"],"cloud-test-lamp")
+        self.assertEqual(device["state"],{"power":False})
+        self.assertIsNone(self.accounts.lan_owner(old_device["id"]))
+        with self.assertRaisesRegex(AccountError,"device-owned"):
+            self.accounts.bind_device(second["id"],manifest,"living",{"power":False})
+        self.accounts = Accounts(self.file)
+        self.assertEqual(self.accounts.cloud_owner(device["id"]),first["id"])
+        _, snapshot, _ = self.request("/api/home/get",{"homeId":first["id"]},owner)
+        self.assertEqual(snapshot["state"]["devices"],[device])
+        snapshot["state"]["devices"] = []
+        self.assertEqual(self.request("/api/home/save",{
+            "homeId":first["id"],"state":snapshot["state"],"revision":snapshot["revision"]
+        },owner)[0],200)
+        self.assertIsNone(self.accounts.cloud_owner(device["id"]))
+
 
 if __name__ == "__main__":
     unittest.main()

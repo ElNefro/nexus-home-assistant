@@ -11,6 +11,8 @@ const sharedHome = (() => {
   let pending = 0;
   let reading = false;
   let currentInvite = '';
+  const invitationCode = /^[A-Za-z0-9_-]{32}$/;
+  let pendingInvite = '';
 
   function message(error) {
     const errors = {
@@ -25,14 +27,39 @@ const sharedHome = (() => {
       'device-token':'Код прибора не подошёл.',
       'device-owned':'Прибор уже привязан к другому дому. Попроси владельца удалить его.',
       'device-unconfirmed':'Прибор не подтвердил команду.',
-      'push-unavailable':'На локальном сервере недоступна отправка push.'
+      'push-unavailable':'На локальном сервере недоступна отправка push.',
+      'home-index-in-use':'Этот код дома уже используется.',
+      'invalid-home-index':'Код дома должен содержать от 3 до 32 латинских букв, цифр или дефисов.',
+      'invalid-member-prefix':'Введи семейный префикс длиной до 24 символов.'
     };
-    return t(errors[error.message] ?? 'Не удалось выполнить действие. Проверь локальный сервер и введённые данные.');
+    return t(errors[error.message] ?? 'Не удалось выполнить действие. Проверь подключение и введённые данные.');
   }
 
   function connected() { return Boolean(home); }
   function canEdit() { return !home || home.role === 'owner'; }
   function dataCopy() { return JSON.parse(JSON.stringify({...data,roomId})); }
+
+  function route(route) {
+    if (pendingInvite) route.set('invite',pendingInvite);
+    return route.toString();
+  }
+
+  function captureInvite(params) {
+    const code = params.get('invite') ?? '';
+    if (!invitationCode.test(code) || code === pendingInvite) return;
+    pendingInvite = code;
+    if (user) joinWithCode(code).catch(error => status(message(error)));
+  }
+
+  function clearInvite(code) {
+    if (pendingInvite !== code) return;
+    pendingInvite = '';
+    const url = new URL(location.href);
+    const params = new URLSearchParams(url.hash.slice(1));
+    params.delete('invite');
+    url.hash = params.toString();
+    history.replaceState(history.state,'',url);
+  }
 
   function display(snapshot) {
     home = snapshot;
@@ -55,37 +82,50 @@ const sharedHome = (() => {
     if (!dialog.open) render();
   }
 
-  async function session() {
-    const result = await api('account/session');
+  function useAccount(result) {
     user = result.user;
     homes = result.homes ?? [];
     available = true;
   }
 
-  async function open(homeId) {
-    const snapshot = await api('home/get',{homeId});
+  async function session() {
+    useAccount(await api('account/session'));
+  }
+
+  function openSnapshot(snapshot) {
     if (!home) {
       guestData = dataCopy();
       lanSessions.clear();
     }
     currentInvite = '';
-    try { localStorage.setItem('kontur-preview-home',homeId); } catch {}
+    try { localStorage.setItem('kontur-preview-home',snapshot.id); } catch {}
     display(snapshot);
   }
 
+  async function open(homeId) {
+    openSnapshot(await api('home/get',{homeId}));
+  }
+
   async function setup() {
-    if (!konturHome.local()) return;
+    if (!konturHome.local() && !konturHome.cloud()) return;
+    if (konturHome.cloud()) {
+      available = true;
+      render();
+    }
+    setInterval(refresh,2500);
     try {
       await session();
       let last;
       try { last = localStorage.getItem('kontur-preview-home'); } catch {}
       const linkedHome = new URLSearchParams(location.hash.slice(1)).get('homeId');
-      if (user && homes.some(item => item.id === linkedHome)) await open(linkedHome);
+      if (user && pendingInvite) await joinWithCode(pendingInvite);
+      else if (user && homes.some(item => item.id === linkedHome)) await open(linkedHome);
       else if (user && homes.some(item => item.id === last)) await open(last);
       else if (user && homes.length === 1) await open(homes[0].id);
       else render();
-      setInterval(refresh,2500);
-    } catch {}
+    } catch (error) {
+      if (pendingInvite) status(message(error));
+    }
   }
 
   async function refresh() {
@@ -95,7 +135,9 @@ const sharedHome = (() => {
     reading = true;
     try {
       const snapshot = await api('home/get',{homeId:id});
-      if (home?.id === id && !pending && snapshot.revision !== home.revision && !dialog.open) display(snapshot);
+      const onlineChanged = konturHome.cloud() && snapshot.state.devices.some(device =>
+        device.online !== home?.state.devices.find(item => item.id === device.id)?.online);
+      if (home?.id === id && !pending && (snapshot.revision !== home.revision || onlineChanged) && !dialog.open) display(snapshot);
     } catch (error) {
       if (home?.id === id && ['home-access-denied','sign-in-required'].includes(error.message)) {
         leave();
@@ -155,6 +197,16 @@ const sharedHome = (() => {
     status(t('Прибор подключён к комнате «{name}».',{name:roomName(room)}));
   }
 
+  async function claim(room,deviceId,setupKey) {
+    const homeId = home?.id;
+    if (!homeId || !canEdit()) throw Error('home-access-denied');
+    const snapshot = await api('home/cloud/claim',{homeId,roomId:room.id,deviceId,setupKey});
+    if (home?.id !== homeId) return;
+    dialog.close();
+    display(snapshot);
+    status(t('Прибор подключён к комнате «{name}».',{name:roomName(room)}));
+  }
+
   function fieldInput(form,error,caption,id,type='text') {
     const input = node('input');
     input.type = type;
@@ -171,6 +223,8 @@ const sharedHome = (() => {
     form.addEventListener('submit',async event => {
       event.preventDefault();
       const submit = form.querySelector('[type=submit]');
+      if (submit.disabled) return;
+      error.hidden = true;
       submit.disabled = true;
       try {
         const values = Object.fromEntries(fields.map(([,key,type],index) => [
@@ -197,9 +251,15 @@ const sharedHome = (() => {
     const [title,action,fields] = config[mode];
     openForm(title,action,fields,async values => {
       const result = await api('account/' + mode,values);
-      await session();
+      useAccount(result);
       dialog.close();
-      if (homes.length === 1) await open(homes[0].id);
+      if (pendingInvite) {
+        try { await joinWithCode(pendingInvite); }
+        catch (error) { status(message(error)); }
+      } else if (homes.length === 1) {
+        try { await open(homes[0].id); }
+        catch (error) { status(message(error)); }
+      }
       render();
       if (result.recoveryCode) {
         const content = modal(t('Код восстановления'));
@@ -213,6 +273,17 @@ const sharedHome = (() => {
     const {form,error} = formModal(t('Создать дом'),t('Создать'));
     const name = nameField('');
     field(form,error,t('Название дома'),'new-home-name',name);
+    const index = konturHome.cloud()
+      ? fieldInput(form,error,'Код дома','new-home-index') : undefined;
+    if (index) {
+      index.minLength = 3;
+      index.maxLength = 32;
+      index.autocomplete = 'off';
+      index.autocapitalize = 'characters';
+      index.spellcheck = false;
+      const hint = node('p','field-note',t('Код дома должен содержать от 3 до 32 латинских букв, цифр или дефисов.'));
+      form.insertBefore(hint,error);
+    }
     const label = node('label','shared-check');
     const importCurrent = node('input');
     importCurrent.type = 'checkbox';
@@ -221,14 +292,17 @@ const sharedHome = (() => {
     form.addEventListener('submit',async event => {
       event.preventDefault();
       const submit = form.querySelector('[type=submit]');
+      if (submit.disabled) return;
       submit.disabled = true;
       try {
+        const code = index?.value.trim();
+        if (index && !/^[A-Za-z0-9-]{3,32}$/.test(code)) throw Error('invalid-home-index');
         const snapshot = await api('home/create',{
-          name:name.value.trim(),state:importCurrent.checked ? guestData ?? dataCopy() : undefined
+          name:name.value.trim(),index:code,state:importCurrent.checked ? guestData ?? dataCopy() : undefined
         });
-        await session();
+        homes.push({id:snapshot.id,name:snapshot.name,role:snapshot.role,index:snapshot.index});
         dialog.close();
-        await open(snapshot.id);
+        openSnapshot(snapshot);
         navigate('rooms');
       } catch (errorValue) {
         showError(error,message(errorValue));
@@ -241,18 +315,44 @@ const sharedHome = (() => {
 
   function join() {
     openForm('Войти по приглашению','Войти',[['Код приглашения','code']],async values => {
-      const snapshot = await api('home/join',values);
-      await session();
-      const selected = snapshot.id ?? snapshot.homeId ?? homes.find(item => item.role === 'member')?.id;
-      dialog.close();
-      if (selected) await open(selected);
-      render();
+      await joinWithCode(values.code);
     });
+    byId('shared-code').value = pendingInvite;
+  }
+
+  let joining = false;
+  async function joinWithCode(code) {
+    if (joining) return;
+    joining = true;
+    try {
+      const snapshot = await api('home/join',{code});
+      clearInvite(pendingInvite);
+      if (dialog.open) dialog.close();
+      homes = homes.filter(item => item.id !== snapshot.id);
+      homes.push({id:snapshot.id,name:snapshot.name,role:snapshot.role,index:snapshot.index});
+      openSnapshot(snapshot);
+    } finally {
+      joining = false;
+    }
   }
 
   function memberRow(member) {
-    const row = node('div','line');
+    const row = node('div','line member-row');
     row.append(node('span','',member.name || member.email),node('small','muted',t(member.role === 'owner' ? 'Владелец' : 'Участник')));
+    if (member.prefix) row.append(node('small','tag',t(member.prefix)));
+    if (konturHome.cloud() && canEdit()) {
+      row.append(button(t('Префикс'),'ghost',() => {
+        openForm('Семейный префикс','Сохранить',[['Префикс','prefix']],async ({prefix}) => {
+          const snapshot = await api('home/member-prefix',{homeId:home.id,userId:member.id ?? member.userId,prefix});
+          dialog.close();
+          display(snapshot);
+        });
+        const input = byId('shared-prefix');
+        input.maxLength = 24;
+        input.required = false;
+        input.value = member.prefix ?? '';
+      }));
+    }
     if (canEdit() && member.role !== 'owner') {
       row.append(button(t('Отозвать доступ'),'ghost',async () => {
         try {
@@ -273,6 +373,7 @@ const sharedHome = (() => {
     const panel = node('section','panel profile-section shared-panel');
     panel.append(node('h2','',t(home?.name ?? 'Общий дом')));
     const actions = node('div','row-buttons');
+    if (pendingInvite) panel.append(node('p','sub',t('Открыто приглашение в дом. Войди, чтобы принять его.')));
     if (!user) {
       panel.append(node('p','sub',t('Создай аккаунт, чтобы управлять домом вместе.')));
       actions.append(button(t('Создать аккаунт'),'primary',() => auth('register')),
@@ -302,6 +403,7 @@ const sharedHome = (() => {
       }));
     }
     if (!home) return panel;
+    if (home.index) panel.append(node('p','sub',t('Код дома: {code}',{code:home.index})));
     panel.append(node('h3','',t('Участники дома')));
     for (const member of home.members ?? []) panel.append(memberRow(member));
     if (canEdit()) {
@@ -313,10 +415,26 @@ const sharedHome = (() => {
       }));
     }
     if (currentInvite) {
-      panel.append(node('p','sub',t('Передай код человеку, которого хочешь пригласить.')),
+      if (konturHome.cloud()) {
+        const url = new URL('/',location.origin);
+        url.hash = new URLSearchParams({page:'profile',invite:currentInvite}).toString();
+        const link = node('input');
+        link.type = 'text';
+        link.readOnly = true;
+        link.value = url.href;
+        link.setAttribute('aria-label',t('Ссылка приглашения'));
+        panel.append(link,button(t('Копировать ссылку'),'ghost',async () => {
+          try {
+            await navigator.clipboard.writeText(link.value);
+            status(t('Ссылка скопирована.'));
+          } catch {
+            link.select();
+          }
+        }));
+      } else panel.append(node('p','sub',t('Передай код человеку, которого хочешь пригласить.')),
         node('code','recovery-code',currentInvite));
     }
-    panel.append(pushPanel());
+    if (konturHome.local()) panel.append(pushPanel());
     return panel;
   }
 
@@ -362,5 +480,6 @@ const sharedHome = (() => {
     return section;
   }
 
-  return {setup,profile,pair,message,connected,canEdit,save,command,schedule,get home() { return home; },get user() { return user; }};
+  return {setup,profile,pair,claim,route,captureInvite,message,connected,canEdit,save,command,schedule,
+    get home() { return home; },get user() { return user; }};
 })();

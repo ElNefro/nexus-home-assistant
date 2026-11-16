@@ -65,7 +65,7 @@
         const transport = transports.includes(device.transport) ? device.transport : undefined;
         const state = Object.fromEntries(device.capabilities.flatMap(item => {
           if (item.momentary === true) return [];
-          const value = Object.hasOwn(device.state,item.id) ? device.state[item.id] : undefined;
+          const value = Object.prototype.hasOwnProperty.call(device.state,item.id) ? device.state[item.id] : undefined;
           if (item.type === 'switch') return [[item.id,typeof value === 'boolean' ? value : false]];
           if (item.type === 'slider') {
             const safeValue = Number.isFinite(value) && value >= item.min && value <= item.max ? value : item.min;

@@ -52,7 +52,7 @@ function isSampleDevice(device) {
 function cleanLegacyHome(home) {
   const devices = home.devices.filter(device => !isSampleDevice(device) && !(
     ['ble','ble-test'].includes(device.transport) && /^ble-[0-9a-f]{12}$/.test(device.id)
-  )).map(device => device.transport === 'lan' ? device : {...device,online:false});
+  )).map(device => ['lan','cloud'].includes(device.transport) ? device : {...device,online:false});
   const rooms = home.rooms.filter(room => room.id === 'living' ||
     !legacySampleRooms.some(example => example.id === room.id && example.name === room.name) ||
     devices.some(device => device.roomId === room.id));
@@ -94,6 +94,20 @@ function loadData() {
   } catch {}
   return {rooms:[{...legacySampleRooms[0]}],devices:[],profile,roomId:'living'};
 }
+function removeLegacyCloudFixture() {
+  if (!konturHome.cloud()) return;
+  const marker = 'kontur-cloud-fixture-removal-1.6.0';
+  try {
+    if (localStorage.getItem(marker)) return;
+    const saved = JSON.parse(localStorage.getItem(storageKey));
+    if (Array.isArray(saved?.devices)) {
+      const devices = saved.devices.filter(device => !(device?.transport === 'cloud' && device.id === 'cloud-light-a0ad70d33fb0'));
+      if (devices.length !== saved.devices.length) localStorage.setItem(storageKey,JSON.stringify({...saved,devices}));
+    }
+    localStorage.setItem(marker,'1');
+  } catch {}
+}
+removeLegacyCloudFixture();
 const data = loadData();
 const lanSessions = new Map();
 const measuredAt = new Map();
@@ -107,11 +121,13 @@ const sensorDescriptions = {
   air_quality:'Оценивает чистоту воздуха по шкале от 0 до 100%.'
 };
 function openDetail(type,id,room='') {
-  location.hash = new URLSearchParams({page,type,id,room}).toString();
+  location.hash = sharedHome.route(new URLSearchParams({page,type,id,room}));
 }
 function syncRoute() {
   const route = new URLSearchParams(location.hash.slice(1));
-  page = Object.hasOwn(pages,route.get('page')) ? route.get('page') : 'home';
+  sharedHome.captureInvite(route);
+  page = Object.prototype.hasOwnProperty.call(pages,route.get('page'))
+    ? route.get('page') : route.has('invite') ? 'profile' : 'home';
   detail = {type:route.get('type'),id:route.get('id'),room:route.get('room')};
   if (dialog.open) dialog.close();
   status('');
@@ -337,7 +353,8 @@ function renderProfile() {
   const initials = profileName(data.profile).split(/\s+/).slice(0,2).map(part => Array.from(part)[0]).join('').toUpperCase();
   const copy = node('div');
   copy.append(node('h2','',profileName(data.profile)),node('p','muted',t('Локальный профиль')));
-  const role = sharedHome.home?.role === 'member' ? 'Участник' : sharedHome.home?.role === 'owner' ? 'Владелец' : data.profile.role;
+  const role = sharedHome.home?.prefix || (sharedHome.home?.role === 'member' ? 'Участник'
+    : sharedHome.home?.role === 'owner' ? 'Владелец' : data.profile.role);
   top.append(node('span','square',initials),copy,node('span','tag',t(role)));
   profile.append(top);
   if (!sharedHome.connected()) profile.append(button(t('Изменить имя'),'ghost',editProfile));
@@ -432,7 +449,7 @@ function render() {
   if (restoreId && restoreId !== 'screen') byId(restoreId)?.focus({preventScroll:true});
 }
 function navigate(next) {
-  const route = 'page=' + next;
+  const route = sharedHome.route(new URLSearchParams({page:next}));
   if (location.hash.slice(1) === route) {
     window.scrollTo(0,0);
     return;
@@ -533,13 +550,13 @@ function control(device,capability) {
   const result = node('div','control');
   const row = node('div','line');
   const label = node('span','',capabilityLabel(device,capability));
-  const value = Object.hasOwn(device.state,capability.id) ? device.state[capability.id] : undefined;
+  const value = Object.prototype.hasOwnProperty.call(device.state,capability.id) ? device.state[capability.id] : undefined;
   row.append(label);
   result.append(row);
   if (capability.momentary === true) {
     const action = button(t('Включить'),'primary',async () => {
       if (!device.online || busyDevices.has(device.id)) return;
-      if (device.transport === 'cloud') {
+      if (device.transport === 'cloud' && !sharedHome.connected()) {
         await cloudCommand(device,capability);
         return;
       }
@@ -621,7 +638,7 @@ function renderDevice(device) {
       continue;
     }
     const metric = {...metrics.find(item => item.id === capability.id),...capability,label:capabilityLabel(device,capability),tone:kind.tone};
-    const value = Object.hasOwn(device.state,capability.id) ? device.state[capability.id] : undefined;
+    const value = Object.prototype.hasOwnProperty.call(device.state,capability.id) ? device.state[capability.id] : undefined;
     const indicator = makeGauge(metric,value);
     gauges.append(indicator.card);
     if (capability.type === 'slider') controls.append(control(device,capability));
@@ -643,7 +660,7 @@ function renderDevice(device) {
     connection.append(button(t('Найти в сети'),'primary',() => addDevice(data.rooms.find(room => room.id === device.roomId))));
     content.append(connection);
   }
-  if (device.transport === 'cloud' && konturCloud.available() && !konturCloud.connected()) {
+  if (device.transport === 'cloud' && konturCloud.available() && !sharedHome.connected() && !konturCloud.connected()) {
     content.append(button(t('Войти по коду владельца'),'primary',() => cloudSignIn()));
   }
   if (gauges.childElementCount) {
@@ -871,7 +888,7 @@ async function transmit(device,capability,value,automatic=false) {
 }
 
 function cloudProfile() {
-  if (!konturCloud.available()) return null;
+  if (!konturCloud.available() || sharedHome.connected()) return null;
   const panel = node('section','panel profile-section');
   panel.append(node('h2','',t('Управление через интернет')));
   if (konturCloud.connected()) {
@@ -893,6 +910,7 @@ function cloudError(error) {
 }
 
 function syncCloudPresence(records) {
+  if (sharedHome.connected()) return;
   let changed = false;
   const present = new Map(records.map(record => [record.id,record]));
   for (const device of data.devices.filter(item => item.transport === 'cloud')) {
@@ -1025,7 +1043,7 @@ async function cloudCommand(device,capability) {
 
 let refreshingCloud = false;
 async function pollCloud() {
-  if (!konturCloud.connected() || refreshingCloud || dialog.open) return;
+  if (!konturCloud.connected() || sharedHome.connected() || refreshingCloud || dialog.open) return;
   refreshingCloud = true;
   let records = [];
   try {
@@ -1044,8 +1062,21 @@ async function pollCloud() {
 
 function addDevice(room) {
   if (konturCloud.available()) {
+    if (sharedHome.connected()) {
+      if (sharedHome.canEdit()) provisionCloudDevice(room);
+      return;
+    }
     if (konturCloud.connected()) showCloudDevices(room);
-    else cloudSignIn(room);
+    else {
+      const content = modal(t('Подключение прибора'));
+      content.append(node('p','sub',t('Войди в аккаунт и создай дом, чтобы подключить новый прибор.')));
+      const actions = node('div','actions');
+      actions.append(button(t('Открыть профиль'),'primary',() => {
+        dialog.close();
+        navigate('profile');
+      }),button(t('Тестовый режим'),'ghost',() => cloudSignIn(room)));
+      content.append(actions);
+    }
     return;
   }
   const content = modal(t('Подключение прибора'));
@@ -1061,7 +1092,7 @@ function addDevice(room) {
       const candidates = items.filter(item => !ids.has('lan-' + item.id) &&
         !data.devices.some(device => device.id === 'lan-' + item.id && (item.legacy || device.roomId !== room.id)));
       lanResults.replaceChildren(...candidates.map(item => {
-        const kind = kinds[Object.hasOwn(kinds,item.kind) ? item.kind : 'other'];
+        const kind = kinds[Object.prototype.hasOwnProperty.call(kinds,item.kind) ? item.kind : 'other'];
         const title = item.legacy ? t(kind.label) : item.name;
         return tile(title,item.legacy ? t('Только обнаружение') : t(kind.label),kind.icon,kind.tone,() => pairLan(room,item));
       }));
@@ -1086,11 +1117,131 @@ function addDevice(room) {
   rescan.focus();
   scanLan();
 }
+
+function provisionCloudDevice(room) {
+  if (!konturProvisioning.available()) {
+    const content = modal(t('Подключение прибора'));
+    const actions = node('div','actions');
+    actions.append(button(t('Привязать уже настроенный прибор'),'ghost',() => claimCloudDevice(room)),
+      button(t('Закрыть'),'primary',() => dialog.close()));
+    content.append(node('p','sub',t('Открой этот дом в Chrome на компьютере с Bluetooth или на Android. После подключения прибором можно управлять с iPhone.')),
+      actions);
+    return;
+  }
+  const {form,error} = formModal(t('Подключение прибора'),t('Найти по Bluetooth'));
+  form.prepend(node('p','sub',t('Включи новый прибор. Подготовь его код настройки и данные домашней сети 2,4 ГГц.')));
+  const nodes = [];
+  for (const [id,label,type,max] of [
+    ['setup-key','Код настройки прибора','password',64],
+    ['wifi-ssid','Имя сети Wi-Fi','text',32],
+    ['wifi-password','Пароль Wi-Fi','password',64]
+  ]) {
+    const input = node('input');
+    input.type = type;
+    input.maxLength = max;
+    input.required = id !== 'wifi-password';
+    input.autocomplete = 'off';
+    input.autocapitalize = 'none';
+    input.spellcheck = false;
+    field(form,error,t(label),id,input);
+    nodes.push(input);
+  }
+  const [key,ssid,password] = nodes;
+  const feedback = node('p','field-note');
+  feedback.setAttribute('role','status');
+  form.insertBefore(feedback,error);
+  form.append(button(t('Привязать уже настроенный прибор'),'ghost',() => {
+    password.value = '';
+    key.value = '';
+    claimCloudDevice(room);
+  }));
+  const submit = form.querySelector('[type=submit]');
+  let deviceId;
+  form.addEventListener('submit',async event => {
+    event.preventDefault();
+    if (submit.disabled) return;
+    const setupKey = key.value.trim().toLowerCase();
+    submit.disabled = true;
+    error.hidden = true;
+    for (const input of nodes) input.disabled = true;
+    try {
+      if (!deviceId) {
+        const selected = await konturProvisioning.provision({setupKey,ssid:ssid.value,password:password.value},stage => {
+          feedback.textContent = t(stage === 'wifi' ? 'Прибор подключается к Wi-Fi…' : 'Передаём настройки по Bluetooth…');
+        });
+        password.value = '';
+        if (!dialog.open || !form.isConnected) return;
+        deviceId = selected.id;
+        submit.textContent = t('Повторить привязку');
+      }
+      feedback.textContent = t('Привязываем прибор к дому…');
+      await sharedHome.claim(room,deviceId,setupKey);
+      key.value = '';
+    } catch (failure) {
+      if (!form.isConnected || !dialog.open) return;
+      const errors = {
+        'invalid-setup-key':'Код настройки состоит из 64 шестнадцатеричных символов.',
+        'invalid-wifi':'Проверь имя и пароль сети Wi-Fi.',
+        'wifi-error':'Прибор не подключился к Wi-Fi. Проверь имя сети и пароль.',
+        'ble-not-ready':'Прибор не готов к настройке. Перезапусти новый прибор и попробуй ещё раз.',
+        'ble-response':'Прибор не ответил по Bluetooth. Попробуй ещё раз.'
+      };
+      if (failure.name === 'NotFoundError') showError(error,t('Прибор не выбран или не найден по Bluetooth.'));
+      else if (deviceId && failure.message === 'device-offline') {
+        showError(error,t('Прибор подключился к Wi-Fi. Дождись его появления в интернете и повтори привязку.'));
+      } else if (deviceId) showError(error,sharedHome.message(failure));
+      else if (failure.message === 'device-token') showError(error,sharedHome.message(failure));
+      else showError(error,t(errors[failure.message] ?? errors['ble-response']));
+    } finally {
+      feedback.textContent = '';
+      submit.disabled = false;
+      if (!deviceId) for (const input of nodes) input.disabled = false;
+    }
+  });
+  key.focus();
+}
+
+function claimCloudDevice(room) {
+  const {form,error} = formModal(t('Привязать уже настроенный прибор'),t('Привязать'));
+  form.prepend(node('p','sub',t('Прибор должен быть подключён к Wi-Fi. Введи его идентификатор и код настройки.')));
+  const id = nameField('');
+  id.maxLength = 64;
+  id.autocomplete = 'off';
+  id.autocapitalize = 'none';
+  id.spellcheck = false;
+  const key = node('input');
+  key.type = 'password';
+  key.required = true;
+  key.maxLength = 64;
+  key.autocomplete = 'off';
+  field(form,error,t('Идентификатор прибора'),'claim-device-id',id);
+  field(form,error,t('Код настройки прибора'),'claim-setup-key',key);
+  const submit = form.querySelector('[type=submit]');
+  form.addEventListener('submit',async event => {
+    event.preventDefault();
+    if (submit.disabled) return;
+    const deviceId = id.value.trim().toLowerCase();
+    const setupKey = key.value.trim().toLowerCase();
+    if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(deviceId)) return showError(error,t('Проверь идентификатор прибора.'));
+    if (!/^[0-9a-f]{64}$/.test(setupKey)) return showError(error,t('Код настройки состоит из 64 шестнадцатеричных символов.'));
+    submit.disabled = true;
+    error.hidden = true;
+    try {
+      await sharedHome.claim(room,deviceId,setupKey);
+      key.value = '';
+    } catch (failure) {
+      if (dialog.open && form.isConnected) showError(error,sharedHome.message(failure));
+    } finally {
+      submit.disabled = false;
+    }
+  });
+  id.focus();
+}
 function pairLan(room,item) {
   const id = 'lan-' + item.id;
   if (item.legacy) {
     if (data.devices.some(device => device.id === id)) return;
-    const kind = Object.hasOwn(kinds,item.kind) ? item.kind : 'other';
+    const kind = Object.prototype.hasOwnProperty.call(kinds,item.kind) ? item.kind : 'other';
     data.devices.push({id,name:kinds[kind].label,nameIsDefault:true,kind,roomId:room.id,
       transport:'lan',online:false,capabilities:[],state:{}});
     complete(t('Прибор добавлен к комнате без управления.'));
@@ -1124,7 +1275,7 @@ function pairLan(room,item) {
         data.devices.push(device);
       }
       Object.assign(device,{
-        name:manifest.name,kind:Object.hasOwn(kinds,manifest.kind) ? manifest.kind : 'other',
+        name:manifest.name,kind:Object.prototype.hasOwnProperty.call(kinds,manifest.kind) ? manifest.kind : 'other',
         capabilities:manifest.capabilities,state:session.state,online:true
       });
       lanSessions.set(id,session);

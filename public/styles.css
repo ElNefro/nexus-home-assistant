@@ -585,6 +585,7 @@ textarea { min-height: 140px; resize: vertical; font-family: ui-monospace, monos
 .profile-section h2, .profile-section p { margin: 0; }
 .profile-section select { width: min(100%, 16rem); }
 .profile-section > button { justify-self: start; }
+.shared-panel .member-row { flex-wrap: wrap; }
 .detail-page [role=status]:empty { display: none; }
 .detail-page [role=status] { margin-block: 10px 0; }
 .shared-panel .line { gap: .65rem; flex-wrap: wrap; }

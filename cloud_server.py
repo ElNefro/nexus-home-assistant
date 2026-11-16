@@ -2,14 +2,17 @@
 from dataclasses import dataclass
 from hashlib import sha256
 from hmac import compare_digest
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 import json
 import os
 import re
 import secrets
-from threading import Lock
+from threading import Lock, BoundedSemaphore
 import time
+
+from server_accounts import AccountError, Accounts, SESSION_COOKIE
 
 
 PANEL_ORIGIN = "https://nexus-home-assistant.onrender.com"
@@ -20,6 +23,7 @@ MAX_PENDING = 8
 MAX_COMMANDS = 128
 MAX_DEVICE_BODY = 8192
 MAX_OWNER_BODY = 2048
+MAX_HOME_BODY = 2_000_000
 DEVICE_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}", re.ASCII)
 COMMAND_ID = re.compile(r"[A-Za-z0-9_-]{24}", re.ASCII)
 TOKEN = re.compile(r"Bearer ([A-Za-z0-9_-]{32,128})", re.ASCII)
@@ -61,6 +65,7 @@ class Config:
     origin: str
     host: str
     port: int
+    setup_hash: bytes | None = None
 
     @classmethod
     def from_env(cls, environ=os.environ):
@@ -80,7 +85,8 @@ class Config:
             raise ValueError("PORT must be a numeric TCP port") from exc
         if not host or not 1 <= port <= 65535:
             raise ValueError("Relay host or port is invalid")
-        return cls(owner_hash, device_hash, device_id, origin, host, port)
+        setup_hash = configured_hash(environ, "KONTUR_SETUP_SHA256") if environ.get("KONTUR_SETUP_SHA256") else None
+        return cls(owner_hash, device_hash, device_id, origin, host, port, setup_hash)
 
 
 def authenticate(header, expected):
@@ -223,6 +229,28 @@ def owner_method(path):
     return None
 
 
+HOME_ROUTES = {
+    "/api/account/session": "GET",
+    **{f"/api/account/{action}": "POST" for action in ("register", "login", "logout", "recover", "profile")},
+    **{f"/api/home/{action}": "POST" for action in (
+        "create", "get", "save", "command", "schedule", "invite", "join", "revoke", "member-prefix", "cloud/claim"
+    )},
+}
+
+
+def live_device(relay):
+    return next(iter(relay.devices()["devices"]), None)
+
+
+def with_cloud_presence(snapshot, relay, accounts):
+    record = live_device(relay)
+    for device in snapshot.get("state", {}).get("devices", []):
+        if device.get("transport") == "cloud":
+            device["online"] = bool(record and record["online"] and device["id"] == "cloud-" + relay.device_id
+                                    and accounts.cloud_owner(device["id"]) == snapshot.get("id"))
+    return snapshot
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "KonturRelay/1"
     sys_version = ""
@@ -273,6 +301,64 @@ class Handler(BaseHTTPRequestHandler):
             raise RelayError(400, "invalid-request")
         return body
 
+    def shared_route(self, accounts, path, config, relay):
+        authorization = self.headers.get_all("Authorization", [])
+        match = TOKEN.fullmatch(authorization[0]) if len(authorization) == 1 else None
+        if authorization and match is None:
+            raise RelayError(401, "sign-in-required")
+        cookie = f"{SESSION_COOKIE}={match[1]}" if match else None
+        body = self.read_json(MAX_HOME_BODY if path in ("/api/home/create", "/api/home/save") else MAX_DEVICE_BODY) if self.command == "POST" else None
+        if path == "/api/home/create" and "index" not in body:
+            raise RelayError(400, "invalid-home-index")
+        if path == "/api/home/cloud/claim":
+            home_id = body.get("homeId")
+            accounts.authorize(cookie, home_id, owner=True)
+            key = body.get("setupKey")
+            if (not isinstance(key, str) or not HASH.fullmatch(key) or config.setup_hash is None
+                    or not compare_digest(sha256(key.lower().encode("ascii")).digest(), config.setup_hash)):
+                raise RelayError(401, "device-token")
+            record = live_device(relay)
+            if body.get("deviceId") != config.device_id:
+                raise RelayError(404, "device-not-found")
+            if not record or not record["online"]:
+                raise RelayError(409, "device-offline")
+            accounts.bind_cloud_device(home_id, record["manifest"], body.get("roomId"))
+            path = "/api/home/get"
+        elif path == "/api/home/command" and body.get("id") == "cloud-" + config.device_id:
+            home_id = body.get("homeId")
+            accounts.authorize(cookie, home_id)
+            if accounts.cloud_owner(body["id"]) != home_id:
+                raise RelayError(403, "home-access-denied")
+            command = relay.enqueue({"deviceId": config.device_id, "capability": body.get("capability"), "value": body.get("value")})
+            deadline = time.monotonic() + COMMAND_TTL + 1
+            while time.monotonic() < deadline:
+                status = relay.status(command["id"])["status"]
+                if status == "applied":
+                    break
+                if status != "pending":
+                    raise RelayError(502, "device-unconfirmed")
+                time.sleep(0.2)
+            else:
+                raise RelayError(502, "device-unconfirmed")
+            path = "/api/home/get"
+        if path in ("/api/account/register", "/api/account/login", "/api/account/recover"):
+            if not self.server.authentication_slots.acquire(blocking=False):
+                raise RelayError(429, "try-again-later")
+            try:
+                result = accounts.route(self.command, path, body, cookie, secure=True)
+            finally:
+                self.server.authentication_slots.release()
+        else:
+            result = accounts.route(self.command, path, body, cookie, secure=True)
+        if result is None:
+            raise RelayError(404, "not-found")
+        status, payload, headers = result
+        if "Set-Cookie" in headers:
+            session = SimpleCookie(headers["Set-Cookie"]).get(SESSION_COOKIE)
+            if session and session.value:
+                payload = {**payload, "sessionToken": session.value}
+        return status, with_cloud_presence(payload, relay, accounts)
+
     def run_route(self):
         path = self.path_only()
         config = self.server.config
@@ -287,27 +373,39 @@ class Handler(BaseHTTPRequestHandler):
                 if origin is not None or not authenticate(self.headers.get("Authorization"), config.device_hash):
                     raise RelayError(401, "device-unauthorized")
                 return self.send_json(200, relay.poll(self.read_json(MAX_DEVICE_BODY)))
-            if owner_method(path) != self.command:
+            if (HOME_ROUTES.get(path) or owner_method(path)) != self.command:
                 raise RelayError(404, "not-found")
             if origins and origins != [config.origin]:
                 raise RelayError(403, "wrong-origin")
             cors = origin
+            accounts = getattr(self.server, "accounts", None)
+            if path in HOME_ROUTES:
+                if accounts is None:
+                    raise RelayError(503, "homes-unavailable")
+                status, body = self.shared_route(accounts, path, config, relay)
+                return self.send_json(status, body, cors)
             if not authenticate(self.headers.get("Authorization"), config.owner_hash):
                 raise RelayError(401, "owner-unauthorized")
+            claimed = accounts and accounts.cloud_owner("cloud-" + config.device_id)
             if path == "/api/cloud/devices":
-                return self.send_json(200, relay.devices(), cors)
+                return self.send_json(200, {"devices": []} if claimed else relay.devices(), cors)
+            if claimed:
+                raise RelayError(403, "device-owned")
             if path == "/api/cloud/commands":
                 return self.send_json(202, relay.enqueue(self.read_json(MAX_OWNER_BODY)), cors)
             return self.send_json(200, relay.status(path.rsplit("/", 1)[1]), cors)
-        except RelayError as exc:
+        except (RelayError, AccountError) as exc:
             return self.send_json(exc.status, {"error": exc.code}, cors)
+        except OSError:
+            return self.send_json(503, {"error": "homes-unavailable"}, cors)
 
     do_GET = run_route
     do_POST = run_route
 
     def do_OPTIONS(self):
         origin = self.headers.get("Origin")
-        expected = owner_method(self.path_only())
+        path = self.path_only()
+        expected = HOME_ROUTES.get(path) or owner_method(path)
         headers = {part.strip().lower() for part in self.headers.get("Access-Control-Request-Headers", "").split(",")}
         headers.discard("")
         if (self.headers.get_all("Origin", []) != [self.server.config.origin] or expected is None
@@ -324,9 +422,11 @@ class Handler(BaseHTTPRequestHandler):
 
 
 class Server(ThreadingHTTPServer):
-    def __init__(self, address, config):
+    def __init__(self, address, config, accounts=None):
         self.config = config
         self.relay = Relay(config.device_id)
+        self.accounts = accounts
+        self.authentication_slots = BoundedSemaphore(2)
         super().__init__(address, Handler)
 
     def get_request(self):
@@ -340,7 +440,10 @@ def run():
         config = Config.from_env()
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
-    with Server((config.host, config.port), config) as server:
+    database_url = os.getenv("DATABASE_URL")
+    local_database = os.getenv("KONTUR_LOCAL_ACCOUNTS_DB")
+    accounts = (Accounts(database_url=database_url) if database_url else Accounts(local_database) if local_database else None)
+    with Server((config.host, config.port), config, accounts) as server:
         print("Kontur cloud relay ready", flush=True)
         server.serve_forever()
 

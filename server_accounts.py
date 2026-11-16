@@ -1,4 +1,4 @@
-"""SQLite account and shared home API for the local Kontur preview."""
+"""Account and shared home API for local and cloud deployments."""
 from contextlib import contextmanager
 from hashlib import scrypt, sha256
 from hmac import compare_digest
@@ -17,12 +17,14 @@ from server_automation import has_schedule_power
 SESSION_COOKIE = "kontur_session"
 SESSION_AGE = 30 * 24 * 60 * 60
 INVITATION_AGE = 24 * 60 * 60
+BINDING_TABLES = {"lan": "lan_bindings", "cloud": "cloud_bindings"}
 ID = re.compile(r"[A-Za-z0-9_-]{1,128}", re.ASCII)
 CAPABILITY_ID = re.compile(r"[a-z][a-z0-9_-]{0,39}", re.ASCII)
+DEVICE_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}", re.ASCII)
+HOME_INDEX = re.compile(r"[A-Z0-9]+(?:-[A-Z0-9]+)*", re.ASCII)
 TIME = re.compile(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]")
 EMAIL = re.compile(r"[^@\s]+@[^@\s.]+(?:\.[^@\s.]+)+")
 SCHEME = """
-PRAGMA journal_mode = WAL;
 CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
     email TEXT NOT NULL UNIQUE,
@@ -57,7 +59,23 @@ CREATE TABLE IF NOT EXISTS lan_bindings (
     device_id TEXT PRIMARY KEY,
     home_id TEXT NOT NULL REFERENCES homes(id) ON DELETE CASCADE
 );
+CREATE TABLE IF NOT EXISTS cloud_bindings (
+    device_id TEXT PRIMARY KEY,
+    home_id TEXT NOT NULL REFERENCES homes(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS home_indices (
+    home_index TEXT PRIMARY KEY,
+    home_id TEXT NOT NULL UNIQUE REFERENCES homes(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS member_prefixes (
+    home_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    prefix TEXT NOT NULL,
+    PRIMARY KEY (home_id, user_id),
+    FOREIGN KEY (home_id, user_id) REFERENCES members(home_id, user_id) ON DELETE CASCADE
+);
 CREATE INDEX IF NOT EXISTS homes_by_user ON members (user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS one_owner_per_home ON members (home_id) WHERE role='owner';
 CREATE INDEX IF NOT EXISTS sessions_by_user ON sessions (user_id);
 """
 
@@ -85,11 +103,19 @@ def name(value, limit=60):
 
 def short_text(value, limit):
     return (isinstance(value, str) and len(value) <= limit
-            and not any(0xd800 <= ord(char) <= 0xdfff for char in value))
+            and not any(char == "\x00" or 0xd800 <= ord(char) <= 0xdfff for char in value))
+
+
+def home_index(value):
+    if not isinstance(value, str) or not value.isascii():
+        raise AccountError(400, "invalid-home-index")
+    cleaned = value.strip().upper()
+    require(3 <= len(cleaned) <= 32 and HOME_INDEX.fullmatch(cleaned), 400, "invalid-home-index")
+    return cleaned
 
 
 def address(value):
-    require(isinstance(value, str) and len(value) <= 254 and EMAIL.fullmatch(value.strip()), 400, "invalid-email")
+    require(short_text(value, 254) and EMAIL.fullmatch(value.strip()), 400, "invalid-email")
     return value.strip().casefold()
 
 
@@ -229,7 +255,7 @@ def clean_home(value, previous=None):
             "online": device.get("online") is True
         }
         transport = device.get("transport")
-        if transport in ("ble", "ble-test", "lan"):
+        if transport in ("ble", "ble-test", "lan", "cloud"):
             entry.update(transport=transport, online=False)
             old = previous_devices.get(device_id)
             if old and old.get("transport") == transport:
@@ -248,14 +274,29 @@ def clean_home(value, previous=None):
 
 
 class Accounts:
-    def __init__(self, path):
+    def __init__(self, path=None, *, database_url=None):
+        self.postgres = None
+        if database_url:
+            from server_accounts_postgres import PostgresStore
+
+            self.postgres = PostgresStore(database_url, SCHEME)
+            self.integrity_error = self.postgres.integrity_error
+            return
+        if path is None:
+            raise ValueError("An accounts database path or URL is required")
+        self.integrity_error = sqlite3.IntegrityError
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as db:
+            db.execute("PRAGMA journal_mode = WAL")
             db.executescript(SCHEME)
 
     @contextmanager
     def connect(self, write=False):
+        if self.postgres:
+            with self.postgres.connect(write=write) as db:
+                yield db
+            return
         db = sqlite3.connect(self.path, timeout=5)
         db.row_factory = sqlite3.Row
         try:
@@ -283,7 +324,8 @@ class Accounts:
             "/api/home/create": self.create_home, "/api/home/get": self.get_home,
             "/api/home/save": self.save_home, "/api/home/command": self.command,
             "/api/home/schedule": self.schedule, "/api/home/invite": self.invite,
-            "/api/home/join": self.join, "/api/home/revoke": self.revoke
+            "/api/home/join": self.join, "/api/home/revoke": self.revoke,
+            "/api/home/member-prefix": self.member_prefix
         }
         try:
             if path in auth:
@@ -308,10 +350,15 @@ class Accounts:
         if user is None:
             return {"user": None, "homes": []}
         homes = db.execute(
-            "SELECT homes.id,homes.name,members.role FROM homes JOIN members ON homes.id=members.home_id "
+            "SELECT homes.id,homes.name,members.role,home_indices.home_index "
+            "FROM homes JOIN members ON homes.id=members.home_id "
+            "LEFT JOIN home_indices ON homes.id=home_indices.home_id "
             "WHERE members.user_id=? ORDER BY homes.name,homes.id", (user["id"],)
         ).fetchall()
-        return {"user": dict(user), "homes": [dict(home) for home in homes]}
+        return {"user": dict(user), "homes": [
+            {"id": home["id"], "name": home["name"], "role": home["role"], "index": home["home_index"]}
+            for home in homes
+        ]}
 
     def start_session(self, db, user_id, cookie_header):
         db.execute("DELETE FROM sessions WHERE expires<=? OR token_hash=?", (int(time.time()), read_cookie(cookie_header)))
@@ -334,7 +381,7 @@ class Accounts:
                 db.execute("INSERT INTO users VALUES (?,?,?,?,?,?)",
                            (user_id, email, display_name, hashed, salt, digest(recovery)))
                 token = self.start_session(db, user_id, cookie_header)
-        except sqlite3.IntegrityError as exc:
+        except self.integrity_error as exc:
             raise AccountError(409, "email-in-use") from exc
         return 201, {"user": {"id": user_id, "email": email, "name": display_name},
                      "homes": [], "recoveryCode": recovery}, session_cookie(token, secure)
@@ -410,19 +457,31 @@ class Accounts:
 
     def home_snapshot(self, db, home, user):
         people = db.execute(
-            "SELECT users.id,users.name,role FROM members JOIN users ON users.id=user_id "
-            "WHERE home_id=? ORDER BY role DESC,users.name,users.id", (home["id"],)
+            "SELECT users.id,users.name,members.role,member_prefixes.prefix "
+            "FROM members JOIN users ON users.id=members.user_id "
+            "LEFT JOIN member_prefixes ON members.home_id=member_prefixes.home_id "
+            "AND members.user_id=member_prefixes.user_id "
+            "WHERE members.home_id=? ORDER BY members.role DESC,users.name,users.id", (home["id"],)
         ).fetchall()
+        members = [{**dict(item), "prefix": item["prefix"] or ("Админ" if item["role"] == "owner" else "Семья")}
+                   for item in people]
+        own_prefix = next((item["prefix"] for item in members if item["id"] == user["id"]), None)
+        index_row = db.execute("SELECT home_index FROM home_indices WHERE home_id=?", (home["id"],)).fetchone()
         state = json.loads(home["data"])
         state["profile"] = {
-            "name": user["name"], "customName": True,
+            "name": user["name"], "customName": True, "prefix": own_prefix,
             "role": "Админ" if home["role"] == "owner" else "Пользователь"
         }
-        return {"id": home["id"], "name": home["name"], "role": home["role"],
-                "state": state, "revision": home["revision"], "members": [dict(item) for item in people]}
+        return {"id": home["id"], "name": home["name"], "role": home["role"], "prefix": own_prefix,
+                "index": index_row["home_index"] if index_row else None,
+                "state": state, "revision": home["revision"], "members": members}
 
     def create_home(self, db, user, body):
         home_name = name(body.get("name"))
+        index = home_index(body["index"]) if "index" in body else None
+        if index:
+            existing = db.execute("SELECT 1 FROM home_indices WHERE home_index=?", (index,)).fetchone()
+            require(existing is None, 409, "home-index-in-use")
         state = clean_home(body["state"]) if "state" in body else {
             "rooms": [{"id": "living", "name": "Гостиная"}], "devices": [], "roomId": "living"
         }
@@ -430,6 +489,8 @@ class Accounts:
         db.execute("INSERT INTO homes (id,name,data) VALUES (?,?,?)",
                    (home_id, home_name, json.dumps(state, ensure_ascii=False, allow_nan=False)))
         db.execute("INSERT INTO members VALUES (?,?,?)", (home_id, user["id"], "owner"))
+        if index:
+            db.execute("INSERT INTO home_indices VALUES (?,?)", (index, home_id))
         return self.home_snapshot(db, self.membership(db, user, home_id), user)
 
     def get_home(self, db, user, body):
@@ -447,19 +508,20 @@ class Accounts:
         state = clean_home(body.get("state"), previous)
         old_devices = {item["id"]: item for item in previous["devices"]}
         devices = {item["id"]: item for item in state["devices"]}
-        bound = db.execute("SELECT device_id FROM lan_bindings WHERE home_id=?", (home["id"],)).fetchall()
-        for item in bound:
-            device_id = item["device_id"]
-            if device_id not in devices:
-                db.execute("DELETE FROM lan_bindings WHERE home_id=? AND device_id=?", (home["id"], device_id))
-                continue
-            old = old_devices[device_id]
-            updated = devices[device_id]
-            for key in ("kind", "transport", "capabilities", "state", "online", "lastSeen"):
-                if key in old:
-                    updated[key] = old[key]
-            if not has_schedule_power(updated["capabilities"]):
-                updated.pop("schedule", None)
+        for table in BINDING_TABLES.values():
+            bound = db.execute(f"SELECT device_id FROM {table} WHERE home_id=?", (home["id"],)).fetchall()
+            for item in bound:
+                device_id = item["device_id"]
+                if device_id not in devices:
+                    db.execute(f"DELETE FROM {table} WHERE home_id=? AND device_id=?", (home["id"], device_id))
+                    continue
+                old = old_devices[device_id]
+                updated = devices[device_id]
+                for key in ("kind", "transport", "capabilities", "state", "online", "lastSeen"):
+                    if key in old:
+                        updated[key] = old[key]
+                if not has_schedule_power(updated["capabilities"]):
+                    updated.pop("schedule", None)
         self.store_home(db, home["id"], state)
         return self.home_snapshot(db, self.membership(db, user, home["id"]), user)
 
@@ -498,9 +560,11 @@ class Accounts:
 
     def update_device_state(self, home_id, device_id, state, online):
         """Update trusted hardware telemetry. Call after adapter authentication."""
+        table = BINDING_TABLES.get(device_id.split("-", 1)[0])
+        require(table is not None, 404, "device-not-found")
         with self.connect(write=True) as db:
             linked = db.execute(
-                "SELECT 1 FROM lan_bindings WHERE home_id=? AND device_id=?", (home_id, device_id)
+                f"SELECT 1 FROM {table} WHERE home_id=? AND device_id=?", (home_id, device_id)
             ).fetchone()
             require(linked, 404, "device-not-found")
             home = db.execute("SELECT data FROM homes WHERE id=?", (home_id,)).fetchone()
@@ -540,34 +604,59 @@ class Accounts:
                     self.store_home(db, home["id"], data)
 
     def has_device(self, home_id, device_id):
-        return self.lan_owner(device_id) == home_id
+        table = BINDING_TABLES.get(device_id.split("-", 1)[0])
+        return table is not None and home_id is not None and self.binding_owner(table, device_id) == home_id
 
     def lan_owner(self, device_id):
+        return self.binding_owner("lan_bindings", device_id)
+
+    def cloud_owner(self, device_id):
+        return self.binding_owner("cloud_bindings", device_id)
+
+    def binding_owner(self, table, device_id):
         with self.connect() as db:
-            binding = db.execute("SELECT home_id FROM lan_bindings WHERE device_id=?", (device_id,)).fetchone()
+            binding = self.lookup_binding(db, table, device_id)
             return binding["home_id"] if binding else None
+
+    def lookup_binding(self, db, table, device_id):
+        return db.execute(f"SELECT home_id FROM {table} WHERE device_id=?", (device_id,)).fetchone()
 
     def bind_device(self, home_id, manifest, room_id, state):
         """Record a manifest and readings already confirmed by the LAN adapter."""
+        return self.bind_physical_device("lan", home_id, manifest, room_id, state, online=True)
+
+    def bind_cloud_device(self, home_id, manifest, room_id, *, online=False):
+        """Record an authenticated manifest from the cloud transport."""
+        return self.bind_physical_device("cloud", home_id, manifest, room_id, {}, online=online)
+
+    def bind_physical_device(self, transport, home_id, manifest, room_id, state, online):
         physical_id = manifest.get("id")
-        require(identifier(physical_id) and len(physical_id) <= 64, 400, "invalid-device")
-        device_id = "lan-" + physical_id
+        require(isinstance(physical_id, str) and DEVICE_ID.fullmatch(physical_id), 400, "invalid-device")
+        device_id = transport + "-" + physical_id
         with self.connect(write=True) as db:
-            claim = db.execute("SELECT home_id FROM lan_bindings WHERE device_id=?", (device_id,)).fetchone()
-            require(claim is None or claim["home_id"] == home_id, 409, "device-owned")
+            for existing_transport, table in BINDING_TABLES.items():
+                existing_id = existing_transport + "-" + physical_id
+                claim = self.lookup_binding(db, table, existing_id)
+                require(claim is None or claim["home_id"] == home_id, 409, "device-owned")
             home = db.execute("SELECT data FROM homes WHERE id=?", (home_id,)).fetchone()
             require(home is not None, 404, "invalid-home")
             data = json.loads(home["data"])
             require(any(room["id"] == room_id for room in data["rooms"]), 400, "invalid-room")
             new_data = clean_home({
                 "rooms": data["rooms"], "devices": [{
-                    "id": device_id, "roomId": room_id, "transport": "lan",
+                    "id": device_id, "roomId": room_id, "transport": transport,
                     "name": manifest.get("name"), "kind": manifest.get("kind"),
                     "capabilities": manifest.get("capabilities"), "state": state
                 }]
             })
             device = new_data["devices"][0]
-            device.update(online=True, lastSeen=int(time.time() * 1000))
+            if online:
+                device.update(online=True, lastSeen=int(time.time() * 1000))
+            for existing_transport, table in BINDING_TABLES.items():
+                if existing_transport != transport:
+                    existing_id = existing_transport + "-" + physical_id
+                    db.execute(f"DELETE FROM {table} WHERE device_id=? AND home_id=?", (existing_id, home_id))
+                    data["devices"] = [item for item in data["devices"] if item["id"] != existing_id]
             old = next((item for item in data["devices"] if item["id"] == device_id), None)
             if old is None:
                 require(len(data["devices"]) < 300, 400, "invalid-home-data")
@@ -576,7 +665,8 @@ class Accounts:
                 if "schedule" in old and has_schedule_power(device["capabilities"]):
                     device["schedule"] = old["schedule"]
                 data["devices"][data["devices"].index(old)] = device
-            db.execute("INSERT OR IGNORE INTO lan_bindings VALUES (?,?)", (device_id, home_id))
+            table = BINDING_TABLES[transport]
+            db.execute(f"INSERT INTO {table} VALUES (?,?) ON CONFLICT (device_id) DO NOTHING", (device_id, home_id))
             self.store_home(db, home_id, data)
             return device
 
@@ -633,11 +723,37 @@ class Accounts:
         require(not existing, 409, "already-member")
         db.execute("INSERT INTO members VALUES (?,?,?)", (home_id, user["id"], "member"))
         db.execute("DELETE FROM invitations WHERE token_hash=?", (digest(code),))
+        db.execute("UPDATE homes SET revision=revision+1 WHERE id=?", (home_id,))
         return self.home_snapshot(db, self.membership(db, user, home_id), user)
 
     def revoke(self, db, user, body):
         home = self.membership(db, user, body.get("homeId"), owner=True)
         user_id = body.get("userId")
         require(identifier(user_id) and user_id != user["id"], 400, "invalid-member")
-        db.execute("DELETE FROM members WHERE home_id=? AND user_id=? AND role='member'", (home["id"], user_id))
-        return self.home_snapshot(db, home, user)
+        deleted = db.execute("DELETE FROM members WHERE home_id=? AND user_id=? AND role='member'",
+                             (home["id"], user_id))
+        if deleted.rowcount:
+            db.execute("UPDATE homes SET revision=revision+1 WHERE id=?", (home["id"],))
+        return self.home_snapshot(db, self.membership(db, user, home["id"]), user)
+
+    def member_prefix(self, db, user, body):
+        home = self.membership(db, user, body.get("homeId"), owner=True)
+        member_id = body.get("userId")
+        require(identifier(member_id), 400, "invalid-member")
+        member = db.execute("SELECT 1 FROM members WHERE home_id=? AND user_id=?",
+                            (home["id"], member_id)).fetchone()
+        require(member is not None, 404, "invalid-member")
+        prefix = body.get("prefix")
+        require(short_text(prefix, 24) and not any(ord(char) < 32 for char in prefix),
+                400, "invalid-member-prefix")
+        prefix = prefix.strip()
+        if prefix:
+            db.execute(
+                "INSERT INTO member_prefixes VALUES (?,?,?) "
+                "ON CONFLICT (home_id,user_id) DO UPDATE SET prefix=excluded.prefix",
+                (home["id"], member_id, prefix)
+            )
+        else:
+            db.execute("DELETE FROM member_prefixes WHERE home_id=? AND user_id=?", (home["id"], member_id))
+        db.execute("UPDATE homes SET revision=revision+1 WHERE id=?", (home["id"],))
+        return self.home_snapshot(db, self.membership(db, user, home["id"]), user)

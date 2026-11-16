@@ -55,6 +55,44 @@
     'В баке закончилась вода': 'The water tank is empty',
     'Этот браузер не поддерживает уведомления с открытой страницы.': 'This browser cannot send notifications from an open page.',
     'Включить': 'Turn on',
+    'Этот код дома уже используется.': 'This home code is already in use.',
+    'Код дома должен содержать от 3 до 32 латинских букв, цифр или дефисов.': 'Use 3–32 Latin letters, digits or hyphens for the home code.',
+    'Введи семейный префикс длиной до 24 символов.': 'Enter a family prefix of up to 24 characters.',
+    'Семья': 'Family',
+    'Код дома': 'Home code',
+    'Код дома: {code}': 'Home code: {code}',
+    'Не удалось выполнить действие. Проверь подключение и введённые данные.': 'Could not complete the action. Check your connection and the information entered.',
+    'Открыто приглашение в дом. Войди, чтобы принять его.': 'You have a home invite. Sign in to accept it.',
+    'Префикс': 'Prefix',
+    'Семейный префикс': 'Family prefix',
+    'Ссылка приглашения': 'Invitation link',
+    'Копировать ссылку': 'Copy link',
+    'Ссылка скопирована.': 'Link copied.',
+    'Войди в аккаунт и создай дом, чтобы подключить новый прибор.': 'Sign in and create a home to connect a new device.',
+    'Открыть профиль': 'Open profile',
+    'Тестовый режим': 'Test mode',
+    'Открой этот дом в Chrome на компьютере с Bluetooth или на Android. После подключения прибором можно управлять с iPhone.': 'Open this home in Chrome on a computer with Bluetooth or on Android. After setup, you can control the device from your iPhone.',
+    'Включи новый прибор. Подготовь его код настройки и данные домашней сети 2,4 ГГц.': 'Turn on the new device. Have its setup code and your 2.4 GHz Wi-Fi details ready.',
+    'Найти по Bluetooth': 'Find via Bluetooth',
+    'Привязать': 'Link',
+    'Привязать уже настроенный прибор': 'Link an already configured device',
+    'Прибор должен быть подключён к Wi-Fi. Введи его идентификатор и код настройки.': 'The device must be connected to Wi-Fi. Enter its identifier and setup code.',
+    'Идентификатор прибора': 'Device identifier',
+    'Проверь идентификатор прибора.': 'Check the device identifier.',
+    'Код настройки прибора': 'Device setup code',
+    'Имя сети Wi-Fi': 'Wi-Fi network name',
+    'Пароль Wi-Fi': 'Wi-Fi password',
+    'Прибор подключается к Wi-Fi…': 'Device is connecting to Wi-Fi…',
+    'Передаём настройки по Bluetooth…': 'Sending settings via Bluetooth…',
+    'Повторить привязку': 'Retry linking',
+    'Привязываем прибор к дому…': 'Linking the device to your home…',
+    'Код настройки состоит из 64 шестнадцатеричных символов.': 'The setup code contains 64 hexadecimal characters.',
+    'Проверь имя и пароль сети Wi-Fi.': 'Check the Wi-Fi name and password.',
+    'Прибор не подключился к Wi-Fi. Проверь имя сети и пароль.': 'The device could not connect to Wi-Fi. Check the network name and password.',
+    'Прибор не готов к настройке. Перезапусти новый прибор и попробуй ещё раз.': 'The device is not ready for setup. Restart the new device and try again.',
+    'Прибор не ответил по Bluetooth. Попробуй ещё раз.': 'The device did not respond over Bluetooth. Try again.',
+    'Прибор не выбран или не найден по Bluetooth.': 'No Bluetooth device was selected or found.',
+    'Прибор подключился к Wi-Fi. Дождись его появления в интернете и повтори привязку.': 'The device connected to Wi-Fi. Wait for it to come online and retry linking.',
     'Подключён через интернет': 'Connected via the internet',
     'Управление через интернет': 'Internet control',
     'Вход по коду владельца выполнен.': 'Signed in with the owner code.',
@@ -301,7 +339,7 @@
   function t(source, values) {
     const translated = locale === 'en' ? english.get(source) ?? source : source;
     if (!values) return translated;
-    return translated.replace(/\{(\w+)\}/g,(match,key) => Object.hasOwn(values,key) ? String(values[key]) : match);
+    return translated.replace(/\{(\w+)\}/g,(match,key) => Object.prototype.hasOwnProperty.call(values,key) ? String(values[key]) : match);
   }
   function number(options) {
     return new Intl.NumberFormat(locale,options);

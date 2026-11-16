@@ -8,7 +8,7 @@ services:
     name: nexus-home-assistant-api
     runtime: python
     plan: free
-    buildCommand: "true"
+    buildCommand: pip install -r requirements-cloud.txt
     startCommand: python cloud_server.py
     healthCheckPath: /healthz
     envVars:
@@ -21,4 +21,8 @@ services:
       - key: KONTUR_DEVICE_SHA256
         sync: false
       - key: KONTUR_DEVICE_ID
+        sync: false
+      - key: KONTUR_SETUP_SHA256
+        sync: false
+      - key: DATABASE_URL
         sync: false
