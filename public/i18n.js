@@ -54,6 +54,7 @@
     'Климат комнаты «{name}»': 'Climate in {name}',
     'В баке закончилась вода': 'The water tank is empty',
     'Этот браузер не поддерживает уведомления с открытой страницы.': 'This browser cannot send notifications from an open page.',
+    'Включить': 'Turn on',
     'Включить уведомления': 'Enable notifications',
     'Разреши уведомления в настройках браузера.': 'Allow notifications in your browser settings.',
     'Уведомления недоступны в этом браузере.': 'Notifications are unavailable in this browser.',

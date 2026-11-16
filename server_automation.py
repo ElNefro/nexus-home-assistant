@@ -6,11 +6,17 @@ PERIODS = (15, 30, 60, 120, 240, 480, 1440)
 FRESH_MS = 300_000
 
 
+def has_schedule_power(capabilities):
+    return any(
+        capability["id"] == "power" and capability["type"] == "switch"
+        and capability.get("momentary") is not True
+        for capability in capabilities
+    )
+
+
 def decision(device, readings, now, previous_minute):
     schedule = device.get("schedule") or {}
-    if not device.get("online") or not any(
-        cap["id"] == "power" and cap["type"] == "switch" for cap in device["capabilities"]
-    ):
+    if not device.get("online") or not has_schedule_power(device["capabilities"]):
         return None, None
     mode = schedule.get("mode")
     power, next_run = None, None

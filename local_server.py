@@ -54,6 +54,10 @@ def normalize_manifest(value):
             or not isinstance(kind, str) or not CAPABILITY_ID.fullmatch(kind)
             or not isinstance(capabilities, list) or not 1 <= len(capabilities) <= 20):
         raise ValueError("manifest")
+    pair_signal = value.get("pairSignal", False)
+    requires_token = value.get("requiresToken") is not False
+    if type(pair_signal) is not bool or (pair_signal and not requires_token):
+        raise ValueError("manifest")
     seen = set()
     for entry in capabilities:
         if not isinstance(entry, dict):
@@ -67,12 +71,17 @@ def normalize_manifest(value):
         if any(not isinstance(entry.get(key, ""), str) or len(entry.get(key, "")) > limit
                for key, limit in (("unit", 12), ("description", 500))):
             raise ValueError("capability")
+        if "momentary" in entry and (type(entry["momentary"]) is not bool or cap_type != "switch"):
+            raise ValueError("capability")
         if cap_type == "slider":
             lo, hi, step = (entry.get(key) for key in ("min", "max", "step"))
             if not all(map(finite, (lo, hi, step))) or hi <= lo or not 0 < step <= hi - lo:
                 raise ValueError("capability")
-    return {"schemaVersion": 1, "id": device_id, "name": name.strip(), "kind": kind,
-            "capabilities": capabilities, "requiresToken": value.get("requiresToken") is not False}
+    manifest = {"schemaVersion": 1, "id": device_id, "name": name.strip(), "kind": kind,
+                "capabilities": capabilities, "requiresToken": requires_token}
+    if pair_signal:
+        manifest["pairSignal"] = True
+    return manifest
 
 
 def state_for(manifest, raw):
@@ -95,9 +104,8 @@ def valid_value(cap, value):
 def device_request(address, route, command=None, token=None):
     headers = {"Accept": "application/json"}
     body = None
-    method = "GET"
+    method = "POST" if route == "pair" or command is not None else "GET"
     if command is not None:
-        method = "POST"
         headers["Content-Type"] = "application/json"
         body = json.dumps(command, allow_nan=False).encode()
     if token:
@@ -267,12 +275,13 @@ class Registry:
             raise ValueError("legacy")
         if manifest["requiresToken"] and not token:
             raise PermissionError("device-token")
-        # Recheck identity before sending any credentials to an address learned via mDNS.
+        # Recheck identity before sending credentials to a discovered address.
         current = normalize_manifest(device_request(address, "manifest"))
         if current["id"] != device_id:
             raise ValueError("device-id")
         manifest = current
-        state = state_for(manifest, device_request(address, "state", token=token))
+        route = "pair" if manifest.get("pairSignal") else "state"
+        state = state_for(manifest, device_request(address, route, token=token))
         session_id = secrets.token_urlsafe(24)
         with self.lock:
             cutoff = time.monotonic() - 3600
@@ -401,6 +410,18 @@ class Handler(SimpleHTTPRequestHandler):
             self.headers.get("Sec-Fetch-Site") in (None, "none", "same-origin")
         )
 
+    def dashboard_navigation(self, path):
+        # A click from the published site can open the shell as a top-level page.
+        # API calls continue to require the local origin.
+        return (
+            path in ("/", "/index.html")
+            and self.headers.get("Host") in LOCAL_HOSTS
+            and self.headers.get("Origin") is None
+            and self.headers.get("Sec-Fetch-Mode") == "navigate"
+            and self.headers.get("Sec-Fetch-Dest") == "document"
+            and self.headers.get("Sec-Fetch-User") == "?1"
+        )
+
     def reply(self, code, payload, headers=None):
         body = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode()
         self.send_response(code)
@@ -427,9 +448,9 @@ class Handler(SimpleHTTPRequestHandler):
         return self.server.accounts.route("POST", "/api/home/get", {"homeId":value["homeId"]}, self.headers.get("Cookie"))
 
     def do_GET(self):
-        if not self.guarded():
-            return self.reply(403, {"error": "wrong-origin"})
         path = urlsplit(self.path).path
+        if not self.guarded() and not self.dashboard_navigation(path):
+            return self.reply(403, {"error": "wrong-origin"})
         if not path.startswith("/api/"):
             return super().do_GET()
         handled = self.shared_route("GET",path)

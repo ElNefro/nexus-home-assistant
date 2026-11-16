@@ -17,7 +17,7 @@
 
   function supportsMode(device,mode) {
     const hasPower = Array.isArray(device?.capabilities) &&
-      device.capabilities.some(item => item?.id === 'power' && item.type === 'switch');
+      device.capabilities.some(item => item?.id === 'power' && item.type === 'switch' && item.momentary !== true);
     return hasPower && (mode === 'interval' || mode === 'auto' && autoMetric(device) !== undefined);
   }
 

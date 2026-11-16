@@ -1,3 +1,4 @@
+import http.client
 import json
 import threading
 import unittest
@@ -45,6 +46,39 @@ class Lamp(BaseHTTPRequestHandler):
 
 
 class BridgeTest(unittest.TestCase):
+    def test_external_click_can_open_dashboard_without_exposing_local_api(self):
+        headers = {
+            "Host": "localhost:8080", "Sec-Fetch-Site": "cross-site",
+            "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document", "Sec-Fetch-User": "?1",
+        }
+
+        with ThreadingHTTPServer(("127.0.0.1", 0), bridge.Handler) as server:
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                def request(method, path, request_headers, body=None):
+                    conn = http.client.HTTPConnection(*server.server_address, timeout=2)
+                    try:
+                        conn.request(method, path, body=body, headers=request_headers)
+                        res = conn.getresponse()
+                        return res.status, res.read()
+                    finally:
+                        conn.close()
+
+                code, dashboard = request("GET", "/", headers)
+                self.assertEqual(code, 200)
+                self.assertIn(b"./app.js", dashboard)
+                self.assertEqual(request("GET", "/api/discovery", headers)[0], 403)
+                self.assertEqual(request("GET", "/", {**headers, "Sec-Fetch-Dest": "iframe"})[0], 403)
+                self.assertEqual(request("GET", "/", {**headers, "Host": "example.com"})[0], 403)
+                self.assertEqual(request("POST", "/api/command", {
+                    **headers, "Origin": "https://nexus-home-assistant.onrender.com",
+                    "Content-Type": "application/json",
+                }, "{}")[0], 403)
+            finally:
+                server.shutdown()
+                thread.join()
+
     def test_pair_read_command_and_rejection(self):
         with ThreadingHTTPServer(("127.0.0.1", 0), Lamp) as lamp:
             thread = threading.Thread(target=lamp.serve_forever,daemon=True)
@@ -72,6 +106,57 @@ class BridgeTest(unittest.TestCase):
         duplicate = {**MANIFEST, "capabilities":[MANIFEST["capabilities"][0]]*2}
         with self.assertRaises(ValueError):
             bridge.normalize_manifest(duplicate)
+
+    def test_pair_signal_is_authenticated_and_state_reads_do_not_retrigger_it(self):
+        manifest = {
+            **MANIFEST, "pairSignal": True,
+            "capabilities": [{**MANIFEST["capabilities"][0], "momentary": True}],
+        }
+        signals = []
+
+        class Indicator(Lamp):
+            def do_GET(self):
+                if self.path == "/kontur/v1/manifest":
+                    self.reply(200, manifest)
+                else:
+                    self.reply(200, {"power": False})
+
+            def do_POST(self):
+                if self.headers.get("Authorization") != "Bearer local-test":
+                    self.reply(401, {})
+                elif self.path == "/kontur/v1/pair":
+                    signals.append(1)
+                    self.reply(200, {"power": False})
+                elif self.path == "/kontur/v1/command":
+                    command = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                    if command == {"capability": "power", "value": True}:
+                        signals.append(4)
+                        self.reply(200, {"power": True})
+                    else:
+                        self.reply(400, {})
+                else:
+                    self.reply(404, {})
+
+        with ThreadingHTTPServer(("127.0.0.1", 0), Indicator) as device:
+            thread = threading.Thread(target=device.serve_forever, daemon=True)
+            thread.start()
+            try:
+                registry = bridge.Registry()
+                with patch.object(bridge, "discover", return_value=[(manifest, device.server_address)]):
+                    registry.scan()
+                with self.assertRaises(PermissionError):
+                    registry.pair(manifest["id"], "wrong")
+                self.assertEqual(signals, [])
+                pair = registry.pair(manifest["id"], "local-test")
+                self.assertEqual(pair["state"], {"power": False})
+                for _ in range(2):
+                    self.assertEqual(registry.session(pair["session"])["state"], {"power": False})
+                    response = registry.session(pair["session"], {"capability": "power", "value": True})
+                    self.assertEqual(response["state"], {"power": True})
+                self.assertEqual(signals, [1, 4, 4])
+            finally:
+                device.shutdown()
+                thread.join()
 
     def test_state_only_exposes_valid_declared_values(self):
         self.assertEqual(bridge.state_for(MANIFEST,{"power":True,"brightness":101,"extra":2}),{"power":True})

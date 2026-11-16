@@ -38,16 +38,21 @@
     const {session,manifest,state} = await request('pair',{id:deviceId,token});
     if (typeof session !== 'string' || !acceptManifest(manifest) || manifest.legacy || manifest.id !== deviceId ||
         !state || typeof state !== 'object' || Array.isArray(state)) throw new Error('device-response');
+    const actionIds = new Set(manifest.capabilities.filter(item => item.momentary === true).map(item => item.id));
+    function readings(values) {
+      if (!actionIds.size) return values;
+      return Object.fromEntries(Object.entries(values).filter(([id]) => !actionIds.has(id)));
+    }
     return {
-      manifest,state,
+      manifest,state:readings(state),
       async read() {
         const result = await request('state',{session});
-        return result.state;
+        return readings(result.state);
       },
       async send(capability,value) {
         const {state:confirmed} = await request('command',{session,capability,value});
         if (confirmed[capability] !== value) throw new Error('not-confirmed');
-        return confirmed;
+        return readings(confirmed);
       }
     };
   }

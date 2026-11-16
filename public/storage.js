@@ -18,6 +18,7 @@
   function capability(item) {
     return object(item) && typeof item.id === 'string' && valueId.test(item.id) && text(item.label,60) &&
       ['switch','slider','sensor'].includes(item.type) &&
+      (item.momentary === undefined || item.type === 'switch' && typeof item.momentary === 'boolean') &&
       (item.unit === undefined || typeof item.unit === 'string' && item.unit.length <= 12) &&
       (item.description === undefined || typeof item.description === 'string' && item.description.length <= 500) &&
       (item.type !== 'slider' || [item.min,item.max,item.step,item.max - item.min].every(Number.isFinite) &&
@@ -63,6 +64,7 @@
       devices: input.devices.map(device => {
         const transport = transports.includes(device.transport) ? device.transport : undefined;
         const state = Object.fromEntries(device.capabilities.flatMap(item => {
+          if (item.momentary === true) return [];
           const value = Object.hasOwn(device.state,item.id) ? device.state[item.id] : undefined;
           if (item.type === 'switch') return [[item.id,typeof value === 'boolean' ? value : false]];
           if (item.type === 'slider') {
@@ -76,7 +78,8 @@
           kind:kinds.includes(device.kind) ? device.kind : 'other',
           online:(!transport || trustedLive) && device.online === true,
           lastSeen:trustedLive && Number.isSafeInteger(device.lastSeen) ? device.lastSeen : undefined,
-          transport, state, schedule:cleanSchedule(device.schedule),
+          transport, state, schedule:device.capabilities.some(item =>
+            item.id === 'power' && item.momentary === true) ? undefined : cleanSchedule(device.schedule),
           nameIsDefault:device.nameIsDefault === true,
           capabilities:device.capabilities,
           waterNotificationSent:device.waterNotificationSent === true

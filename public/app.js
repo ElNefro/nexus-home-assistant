@@ -532,7 +532,27 @@ function control(device,capability) {
   const value = Object.hasOwn(device.state,capability.id) ? device.state[capability.id] : undefined;
   row.append(label);
   result.append(row);
-  if (capability.type === 'switch') {
+  if (capability.momentary === true) {
+    const action = button(t('Включить'),'primary',async () => {
+      if (!device.online || busyDevices.has(device.id)) return;
+      if (!sharedHome.connected()) {
+        await transmit(device,capability.id,true);
+        return;
+      }
+      busyDevices.add(device.id);
+      render();
+      try {
+        await sharedHome.command(device,capability.id,true);
+      } finally {
+        busyDevices.delete(device.id);
+        if (!dialog.open) render();
+      }
+    });
+    action.id = 'device-action-' + capability.id;
+    action.disabled = !device.online;
+    if (busyDevices.has(device.id)) action.setAttribute('aria-disabled','true');
+    row.append(action);
+  } else if (capability.type === 'switch') {
     const toggle = button('','switch',() => {
       const next = toggle.getAttribute('aria-checked') !== 'true';
       if (sharedHome.connected()) sharedHome.command(device,capability.id,next);
@@ -581,6 +601,10 @@ function renderDevice(device) {
   const gauges = node('div','gauges');
   panel.append(gauges);
   for (const capability of device.capabilities) {
+    if (capability.momentary === true) {
+      controls.append(control(device,capability));
+      continue;
+    }
     if (capability.type === 'switch') {
       const metric = {...capability,label:capabilityLabel(device,capability),tone:kind.tone,min:0,max:1,format:value => value ? t('Вкл.') : t('Выкл.')};
       const indicator = makeGauge(metric,typeof device.state[capability.id] === 'boolean' ? Number(device.state[capability.id]) : undefined);
@@ -856,9 +880,9 @@ function addDevice(room) {
     } catch {
       if (!konturLan.available()) {
         const link = node('a','ghost',t('Открыть локальную панель'));
-        link.href = 'http://127.0.0.1:8080/';
+        link.href = 'http://localhost:8080/#page=devices';
         link.target = '_blank';
-        link.rel = 'noopener';
+        link.rel = 'noopener noreferrer';
         lanResults.replaceChildren(node('p','sub',t('Запусти локальный сервис на компьютере в той же сети.')),link);
       } else lanResults.replaceChildren(node('p','muted',t('Поиск по Wi-Fi недоступен. Повтори попытку.')));
 

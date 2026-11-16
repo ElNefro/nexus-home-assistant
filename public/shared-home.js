@@ -139,7 +139,9 @@ const sharedHome = (() => {
 
   function command(device, capability, value) {
     status('Отправляем команду…');
-    return queue('home/command',{id:device.id,capability,value},t('Состояние подтверждено.'));
+    const momentary = device.capabilities.some(item => item.id === capability && item.momentary === true);
+    const result = momentary ? 'Плата подтвердила команду.' : 'Состояние подтверждено.';
+    return queue('home/command',{id:device.id,capability,value},t(result));
   }
 
   function schedule(device) {

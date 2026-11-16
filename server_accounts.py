@@ -11,6 +11,8 @@ import secrets
 import sqlite3
 import time
 
+from server_automation import has_schedule_power
+
 
 SESSION_COOKIE = "kontur_session"
 SESSION_AGE = 30 * 24 * 60 * 60
@@ -147,6 +149,8 @@ def clean_capability(value):
     require(isinstance(cap_id, str) and CAPABILITY_ID.fullmatch(cap_id) and kind in ("switch", "slider", "sensor"),
             400, "invalid-home-data")
     result = {"id": cap_id, "type": kind, "label": name(value.get("label"))}
+    if kind == "switch" and value.get("momentary") is True:
+        result["momentary"] = True
     for key, limit in (("unit", 12), ("description", 500)):
         text = value.get(key)
         if short_text(text, limit):
@@ -185,8 +189,14 @@ def clean_schedule(value):
 
 def clean_readings(capabilities, state):
     require(isinstance(state, dict), 400, "invalid-home-data")
-    return {item["id"]: state[item["id"]] for item in capabilities
-            if item["id"] in state and valid_state_value(item, state[item["id"]])}
+    readings = {}
+    for item in capabilities:
+        key = item["id"]
+        if item.get("momentary") is True:
+            readings[key] = False
+        elif key in state and valid_state_value(item, state[key]):
+            readings[key] = state[key]
+    return readings
 
 
 def clean_home(value, previous=None):
@@ -227,7 +237,7 @@ def clean_home(value, previous=None):
                 entry["online"] = old["online"]
                 if "lastSeen" in old:
                     entry["lastSeen"] = old["lastSeen"]
-        if isinstance(device.get("schedule"), dict):
+        if has_schedule_power(caps) and isinstance(device.get("schedule"), dict):
             entry["schedule"] = clean_schedule(device["schedule"])
         clean_devices[device_id] = entry
     selected = value.get("roomId")
@@ -448,6 +458,8 @@ class Accounts:
             for key in ("kind", "transport", "capabilities", "state", "online", "lastSeen"):
                 if key in old:
                     updated[key] = old[key]
+            if not has_schedule_power(updated["capabilities"]):
+                updated.pop("schedule", None)
         self.store_home(db, home["id"], state)
         return self.home_snapshot(db, self.membership(db, user, home["id"]), user)
 
@@ -468,7 +480,7 @@ class Accounts:
         value = body.get("value")
         require(capability is not None and capability["type"] != "sensor" and valid_state_value(capability, value),
                 400, "invalid-command")
-        device["state"][command] = value
+        device["state"][command] = False if capability.get("momentary") is True else value
         self.store_home(db, home["id"], state)
         return self.home_snapshot(db, self.membership(db, user, home["id"]), user)
 
@@ -476,8 +488,7 @@ class Accounts:
         home = self.membership(db, user, body.get("homeId"))
         state = json.loads(home["data"])
         device = self.device_for(state, body.get("id"))
-        require(any(item["id"] == "power" and item["type"] == "switch" for item in device["capabilities"]),
-                400, "invalid-schedule")
+        require(has_schedule_power(device["capabilities"]), 400, "invalid-schedule")
         schedule = clean_schedule(body.get("schedule"))
         require(schedule.get("mode") != "auto" or device["kind"] in ("humidifier", "purifier"),
                 400, "invalid-schedule")
@@ -562,7 +573,7 @@ class Accounts:
                 require(len(data["devices"]) < 300, 400, "invalid-home-data")
                 data["devices"].append(device)
             else:
-                if "schedule" in old:
+                if "schedule" in old and has_schedule_power(device["capabilities"]):
                     device["schedule"] = old["schedule"]
                 data["devices"][data["devices"].index(old)] = device
             db.execute("INSERT OR IGNORE INTO lan_bindings VALUES (?,?)", (device_id, home_id))
@@ -590,12 +601,10 @@ class Accounts:
             state = json.loads(home["data"])
             device = self.device_for(state, device_id)
             schedule = device.get("schedule")
-            if not schedule or not device["online"]:
+            if not schedule or not device["online"] or not has_schedule_power(device["capabilities"]):
                 return False
             if power is not None:
-                if device.get("transport") or type(power) is not bool or not any(
-                    item["id"] == "power" and item["type"] == "switch" for item in device["capabilities"]
-                ):
+                if device.get("transport") or type(power) is not bool:
                     return False
                 device["state"]["power"] = power
             if next_run is not None:

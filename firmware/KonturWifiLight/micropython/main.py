@@ -2,11 +2,11 @@
 
 import json
 import socket
-from machine import PWM, Pin, unique_id
+from machine import Pin, unique_id
 from network import WLAN
 from time import sleep_ms, ticks_add, ticks_diff, ticks_ms
 
-from kontur_config import DEVICE_TOKEN, LED_GPIO, WIFI_PASSWORD, WIFI_SSID
+import kontur_config
 
 
 HTTP_PORT = 80
@@ -18,6 +18,10 @@ MAX_HEADERS = 1024
 MAX_COMMAND = 256
 REQUEST_TIMEOUT_MS = 850
 RETRY_MS = 5000
+BLINK_ON_MS = 140
+BLINK_OFF_MS = 140
+BETWEEN_BURSTS_MS = 320
+MAX_PENDING_BLINKS = 8
 DEVICE_NAME = "Светильник ESP32"
 ROUTE_PREFIX = b"/kontur/v1/"
 TOKEN_CHARACTERS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
@@ -38,35 +42,44 @@ class RequestError(Exception):
     pass
 
 
-class Light:
-    def __init__(self, pin):
-        self.pin = Pin(pin, Pin.OUT, value=0)
-        self.output = PWM(self.pin, freq=5000, duty_u16=0)
-        self.power = False
-        self.brightness = 50
+class Indicator:
+    def __init__(self, pin, active_low):
+        self.idle_level = int(active_low)
+        self.pin = Pin(pin, Pin.OUT, value=self.idle_level)
+        self.pending = []
+        self.reset()
 
-    def set(self, power, brightness):
-        if self.output is None:
-            raise RequestError(503, "led-output-unavailable")
-        try:
-            self.output.duty_u16((brightness * 65535 + 50) // 100 if power else 0)
-        except (OSError, ValueError):
-            self.close()
-            raise RequestError(503, "led-output-unavailable")
-        self.power = power
-        self.brightness = brightness
+    def blink(self, count):
+        if len(self.pending) >= MAX_PENDING_BLINKS:
+            raise RequestError(503, "blink-queue-full")
+        self.pending.append(count)
+        self.poll(ticks_ms())
 
-    def state(self):
-        return {"power": self.power, "brightness": self.brightness}
+    def poll(self, now):
+        if self.next_edge is not None and ticks_diff(now, self.next_edge) < 0:
+            return
+        if self.lit:
+            self.pin.value(self.idle_level)
+            self.lit = False
+            self.remaining -= 1
+            pause = BLINK_OFF_MS if self.remaining else BETWEEN_BURSTS_MS
+            self.next_edge = ticks_add(now, pause)
+            return
+        if not self.remaining and self.pending:
+            self.remaining = self.pending.pop(0)
+        if self.remaining:
+            self.pin.value(1 - self.idle_level)
+            self.lit = True
+            self.next_edge = ticks_add(now, BLINK_ON_MS)
+        else:
+            self.next_edge = None
 
-    def close(self):
-        if self.output is not None:
-            try:
-                self.output.deinit()
-            finally:
-                self.output = None
-                self.pin.init(Pin.OUT, value=0)
-        self.power = False
+    def reset(self):
+        self.pending.clear()
+        self.next_edge = None
+        self.remaining = 0
+        self.lit = False
+        self.pin.value(self.idle_level)
 
 
 def read_chunk(client, size, deadline):
@@ -138,35 +151,39 @@ def read_command(client, headers, body, deadline):
     return command
 
 
-def route(client, manifest, expected_token, light):
+def route(client, manifest, expected_token, indicator):
     deadline = ticks_add(ticks_ms(), REQUEST_TIMEOUT_MS)
     method, path, headers, body = read_headers(client, deadline)
     if method == b"GET" and path == ROUTE_PREFIX + b"manifest":
         return manifest
     read = method == b"GET" and path == ROUTE_PREFIX + b"state"
     write = method == b"POST" and path == ROUTE_PREFIX + b"command"
-    if not (read or write):
+    pair = method == b"POST" and path == ROUTE_PREFIX + b"pair"
+    if not (read or write or pair):
         raise RequestError(404, "not-found")
     if not authorized(headers.get(b"authorization"), expected_token):
         raise RequestError(401, "token-required")
+    if pair:
+        if body or b"transfer-encoding" in headers or headers.get(b"content-length", b"0") != b"0":
+            raise RequestError(400, "expected-empty-body")
+        indicator.blink(1)
+        print("LED pattern: pairing, 1 blink")
     if write:
         command = read_command(client, headers, body, deadline)
-        capability = command.get("capability")
         value = command["value"]
-        if capability == "power" and type(value) is bool:
-            light.set(value, light.brightness)
-        elif capability == "brightness" and type(value) is int and 0 <= value <= 100:
-            light.set(light.power, value)
-        else:
+        if command.get("capability") != "power" or type(value) is not bool:
             raise RequestError(400, "invalid-capability-or-value")
-        print("Light state: power=%s, brightness=%d" % ("on" if light.power else "off", light.brightness))
-    return light.state()
+        if value:
+            indicator.blink(4)
+            print("LED pattern: command, 4 blinks")
+            return {"power": True}
+    return {"power": False}
 
 
-def serve_client(client, manifest, expected_token, light):
+def serve_client(client, manifest, expected_token, indicator):
     try:
         try:
-            result = route(client, manifest, expected_token, light)
+            result = route(client, manifest, expected_token, indicator)
             status = 200
         except RequestError as error:
             status, message = error.args
@@ -233,27 +250,29 @@ def manifest_for(device_id):
         "kind": "light",
         "name": DEVICE_NAME,
         "requiresToken": True,
+        "pairSignal": True,
         "capabilities": [
-            {"id": "power", "type": "switch", "label": "Питание"},
-            {"id": "brightness", "type": "slider", "label": "Яркость", "min": 0, "max": 100,
-             "step": 1, "unit": "%"},
+            {"id": "power", "type": "switch", "label": "Мигнуть", "momentary": True},
         ],
     }
 
 
 def run():
-    if type(LED_GPIO) is not int or LED_GPIO < 0:
-        print("Set LED_GPIO to an available output on your ESP32 board")
+    led_gpio = kontur_config.LED_GPIO
+    led_active_low = getattr(kontur_config, "LED_ACTIVE_LOW", False)
+    if type(led_gpio) is not int or led_gpio < 0 or type(led_active_low) is not bool:
+        print("Set LED_GPIO and LED_ACTIVE_LOW for your onboard ESP32 LED")
         return
-    if not WIFI_SSID or not 32 <= len(DEVICE_TOKEN) <= 128 or any(
-            character not in TOKEN_CHARACTERS for character in DEVICE_TOKEN):
+    device_token = kontur_config.DEVICE_TOKEN
+    if not kontur_config.WIFI_SSID or not 32 <= len(device_token) <= 128 or any(
+            character not in TOKEN_CHARACTERS for character in device_token):
         print("Configure Wi-Fi and a 32-128 character device token in kontur_config.py")
         return
-    light = Light(LED_GPIO)
+    indicator = Indicator(led_gpio, led_active_low)
     # The original Arduino sketch formats its eFuse MAC as a little-endian integer.
     device_id = "light-" + "".join("%02x" % part for part in reversed(unique_id()))
     manifest = manifest_for(device_id)
-    expected_token = b"Bearer " + DEVICE_TOKEN.encode("ascii")
+    expected_token = b"Bearer " + device_token.encode("ascii")
     wlan = WLAN(getattr(WLAN, "IF_STA", 0))
     listener = None
     discovery = None
@@ -262,7 +281,7 @@ def run():
     waiting_at = ticks_add(ticks_ms(), 15000)
     try:
         wlan.active(True)
-        wlan.connect(WIFI_SSID, WIFI_PASSWORD)
+        wlan.connect(kontur_config.WIFI_SSID, kontur_config.WIFI_PASSWORD)
         print("Connecting %s to Wi-Fi" % device_id)
         while True:
             now = ticks_ms()
@@ -274,7 +293,7 @@ def run():
                 if listener is not None:
                     listener.close()
                     listener = None
-                    light.set(False, light.brightness)
+                    indicator.reset()
                     print("Wi-Fi connection changed")
                 active_ip = ip
                 retry_at = now
@@ -297,16 +316,17 @@ def run():
                         print("UDP discovery setup failed:", error)
             if discovery is not None:
                 poll_discovery(discovery)
+            indicator.poll(now)
             if listener is not None:
                 try:
                     client, _ = listener.accept()
                 except OSError:
                     pass
                 else:
-                    serve_client(client, manifest, expected_token, light)
+                    serve_client(client, manifest, expected_token, indicator)
             sleep_ms(10)
     finally:
-        light.close()
+        indicator.reset()
         if discovery is not None:
             discovery.close()
         if listener is not None:

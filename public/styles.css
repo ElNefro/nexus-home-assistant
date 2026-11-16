@@ -31,6 +31,7 @@ body {
 button, input, select, textarea { font: inherit; }
 button, select { cursor: pointer; }
 button:disabled, input:disabled { cursor: default; opacity: .52; }
+.primary[aria-disabled=true] { cursor: wait; opacity: .65; }
 :where(button, a, input, select, textarea):focus-visible {
   outline: 2px solid var(--active);
   outline-offset: 3px;
