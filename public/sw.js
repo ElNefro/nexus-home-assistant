@@ -1,12 +1,13 @@
 'use strict';
 
-const cacheName = 'kontur-shell-1.5.3';
+const cacheName = 'kontur-shell-1.5.4';
 const shell = [
-  './','./index.html','./offline.html','./styles.css?v=1.5.3','./app.js?v=1.5.3','./i18n.js?v=1.5.3','./home-api.js?v=1.5.3','./room-scene.js?v=1.5.3','./shared-home.js?v=1.5.3',
-  './storage.js?v=1.5.3','./platform.js?v=1.5.3','./manifest.webmanifest',
-  './icons/kontur-192.png','./icons/kontur-512.png','./automation.js?v=1.5.3','./lan.js?v=1.5.3','./cloud.js?v=1.5.3','./images/room-dome.png'
+  './','./index.html','./offline.html','./styles.css?v=1.5.4','./app.js?v=1.5.4','./i18n.js?v=1.5.4','./home-api.js?v=1.5.4','./room-scene.js?v=1.5.4','./shared-home.js?v=1.5.4',
+  './storage.js?v=1.5.4','./platform.js?v=1.5.4','./manifest.webmanifest',
+  './icons/kontur-192.png','./icons/kontur-512.png','./automation.js?v=1.5.4','./lan.js?v=1.5.4','./cloud.js?v=1.5.4','./images/room-dome.png'
 ];
 const shellUrls = new Set(shell.map(path => new URL(path,self.registration.scope).href));
+const navigationPaths = new Set(['./','./index.html'].map(path => new URL(path,self.registration.scope).pathname));
 
 self.addEventListener('install',event => {
   event.waitUntil(caches.open(cacheName).then(cache =>
@@ -25,6 +26,14 @@ self.addEventListener('activate',event => {
 
 self.addEventListener('fetch',event => {
   const request = event.request;
+  const url = new URL(request.url);
+  if (request.method === 'GET' && request.mode === 'navigate' && url.origin === self.location.origin && navigationPaths.has(url.pathname)) {
+    event.respondWith(fetch(request,{cache:'no-cache'}).catch(async () => {
+      const cache = await caches.open(cacheName);
+      return await cache.match(self.registration.scope) ?? Response.error();
+    }));
+    return;
+  }
   if (request.method !== 'GET' || !shellUrls.has(request.url)) return;
   event.respondWith((async () => {
     const cache = await caches.open(cacheName);

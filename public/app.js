@@ -294,10 +294,13 @@ function warnings(devices) {
 function renderDevices() {
   const room = currentRoom();
   const devices = roomDevices(room.id);
+  const emptyMessage = konturCloud.available() && !konturCloud.connected()
+    ? t('Первый вход на этом устройстве: нажми «Добавить прибор» и введи код владельца.')
+    : t('В этой комнате пока нет приборов.');
   return [
     heading(roomName(room),t('Приборы'),''),
     sectionHead(t('Список приборов'),sharedHome.canEdit() ? button(t('＋ Добавить прибор'),'primary',() => addDevice(room)) : null),
-    list(devices.map(device => deviceTile(device)),t('В этой комнате пока нет приборов.'))
+    list(devices.map(device => deviceTile(device)),emptyMessage)
   ];
 }
 function renderRooms() {
@@ -914,6 +917,8 @@ function cloudSignIn(room) {
   input.required = true;
   input.maxLength = 256;
   input.autocomplete = 'off';
+  input.autocapitalize = 'none';
+  input.spellcheck = false;
   field(form,error,t('Код владельца'),'cloud-owner-code',input);
   const feedback = node('p','field-note');
   feedback.setAttribute('role','status');
@@ -932,7 +937,7 @@ function cloudSignIn(room) {
       const records = await konturCloud.connect(code);
       syncCloudPresence(records);
       if (!dialog.open || !form.isConnected) return;
-      if (room) showCloudDevices(room,records);
+      if (room) showCloudDevices(room,records,true);
       else {
         dialog.close();
         render();
@@ -950,11 +955,25 @@ function cloudSignIn(room) {
   input.focus();
 }
 
-function showCloudDevices(room,initial) {
+function showCloudDevices(room,initial,openOnlyDevice=false) {
   const content = modal(t('Подключение прибора'));
   const results = node('div','device-links');
   results.setAttribute('aria-live','polite');
   const refresh = button(t('Обновить список'),'ghost',() => load());
+  function attach(device) {
+    if (!data.rooms.some(item => item.id === room.id)) return;
+    const id = 'cloud-' + device.id;
+    const existing = data.devices.find(item => item.id === id);
+    if (existing) {
+      dialog.close();
+      showDevice(existing);
+      return;
+    }
+    const saved = {...device,id,roomId:room.id,transport:'cloud',state:{}};
+    data.devices.push(saved);
+    complete(t('Прибор подключён к комнате «{name}».',{name:roomName(room)}));
+    showDevice(saved);
+  }
   async function load(records) {
     refresh.disabled = true;
     results.replaceChildren(node('p','muted',t('Проверяем приборы на сервере…')));
@@ -962,16 +981,15 @@ function showCloudDevices(room,initial) {
       const devices = records ?? await konturCloud.devices(undefined,75_000);
       if (!results.isConnected || !dialog.open) return;
       syncCloudPresence(devices);
+      if (records && openOnlyDevice && devices.length === 1) {
+        attach(devices[0]);
+        return;
+      }
       const known = new Set(data.devices.map(device => device.id));
       const available = devices.filter(device => !known.has('cloud-' + device.id));
       results.replaceChildren(...available.map(device => {
         const kind = kindFor(device);
-        return tile(device.name,t(device.online ? 'В сети' : 'Не в сети'),kind.icon,kind.tone,() => {
-          const id = 'cloud-' + device.id;
-          if (data.devices.some(item => item.id === id) || !data.rooms.some(item => item.id === room.id)) return;
-          data.devices.push({...device,id,roomId:room.id,transport:'cloud',state:{}});
-          complete(t('Прибор подключён к комнате «{name}».',{name:roomName(room)}));
-        });
+        return tile(device.name,t(device.online ? 'В сети' : 'Не в сети'),kind.icon,kind.tone,() => attach(device));
       }));
       if (!available.length) results.append(node('p','muted',t('Новых приборов на сервере пока нет.')));
     } catch (failure) {

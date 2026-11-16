@@ -15,23 +15,32 @@
   async function request(path,code,body,timeout) {
     if (!available() || !code) throw Error('cloud-sign-in');
     const headers = {'Authorization':'Bearer ' + code, 'Accept':'application/json'};
-    const options = {
-      headers, credentials:'omit', cache:'no-store', redirect:'error',
-      signal:AbortSignal.timeout(timeout)
-    };
+    const options = {headers, credentials:'omit', cache:'no-store', redirect:'error'};
     if (body !== undefined) {
       options.method = 'POST';
       headers['Content-Type'] = 'application/json';
       options.body = JSON.stringify(body);
     }
-    const response = await fetch(apiOrigin + '/api/cloud/' + path,options);
-    if (response.status === 401 || response.status === 403) {
-      if (ownerCode === code) ownerCode = undefined;
-      throw Error('cloud-sign-in');
+    let timer;
+    if (typeof root.AbortSignal?.timeout === 'function') {
+      options.signal = root.AbortSignal.timeout(timeout);
+    } else if (typeof root.AbortController === 'function') {
+      const controller = new root.AbortController();
+      options.signal = controller.signal;
+      timer = setTimeout(() => controller.abort(),timeout);
     }
-    if (response.status === 409) throw Error('cloud-offline');
-    if (!response.ok) throw Error('cloud-unavailable');
-    return response.json();
+    try {
+      const response = await fetch(apiOrigin + '/api/cloud/' + path,options);
+      if (response.status === 401 || response.status === 403) {
+        if (ownerCode === code) ownerCode = undefined;
+        throw Error('cloud-sign-in');
+      }
+      if (response.status === 409) throw Error('cloud-offline');
+      if (!response.ok) throw Error('cloud-unavailable');
+      return await response.json();
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
   }
 
   async function devices(code=ownerCode,timeout=12_000) {

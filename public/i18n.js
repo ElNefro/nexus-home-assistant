@@ -75,6 +75,7 @@
     'Список приборов': 'Device list',
     '＋ Добавить прибор': '＋ Add device',
     'В этой комнате пока нет приборов.': 'No devices in this room yet.',
+    'Первый вход на этом устройстве: нажми «Добавить прибор» и введи код владельца.': 'On this device, tap Add device and enter your owner code to get started.',
     'Твои комнаты': 'Your rooms',
     '＋ Создать комнату': '＋ Create room',
     '‹ Комнаты': '‹ Rooms',
