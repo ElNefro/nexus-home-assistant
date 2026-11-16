@@ -22,8 +22,12 @@ BLINK_ON_MS = 140
 BLINK_OFF_MS = 140
 BETWEEN_BURSTS_MS = 320
 MAX_PENDING_BURSTS = 8
+GATEWAY_RECEIPT_LIMIT = 96
+GATEWAY_REPLAY_MS = 240000
 DEVICE_NAME = "Светильник ESP32"
 ROUTE_PREFIX = b"/kontur/v1/"
+GATEWAY_COMMAND = ROUTE_PREFIX + b"cloud/command"
+GATEWAY_STATUS_PREFIX = ROUTE_PREFIX + b"cloud/commands/"
 TOKEN_CHARACTERS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
 
 STATUS_TEXT = {
@@ -92,6 +96,57 @@ class Indicator:
         self.pending.clear()
 
 
+def valid_gateway_id(command_id):
+    return type(command_id) is str and 1 <= len(command_id) <= 96 and all(
+        character in TOKEN_CHARACTERS for character in command_id
+    )
+
+
+class GatewayCommands:
+    def __init__(self, indicator):
+        self.indicator = indicator
+        self.receipts = {}
+
+    def prune(self):
+        now = ticks_ms()
+        expired = [
+            command_id for command_id, (_, done_at) in self.receipts.items()
+            if done_at is not None and ticks_diff(now, done_at) >= GATEWAY_REPLAY_MS
+        ]
+        for command_id in expired:
+            del self.receipts[command_id]
+
+    def complete(self, command_id, ok):
+        if self.receipts[command_id][0] == "pending":
+            self.receipts[command_id] = ("applied" if ok else "failed", ticks_ms())
+
+    def submit(self, command):
+        command_id = command.get("id")
+        if not valid_gateway_id(command_id) or command.get("capability") != "power" or command.get("value") is not True:
+            raise RequestError(400, "invalid-gateway-command")
+        self.prune()
+        if command_id in self.receipts:
+            return {"status": self.receipts[command_id][0]}
+        if len(self.receipts) >= GATEWAY_RECEIPT_LIMIT:
+            raise RequestError(503, "gateway-history-full")
+        self.receipts[command_id] = ("pending", None)
+        try:
+            self.indicator.blink(4, lambda ok: self.complete(command_id, ok))
+            print("LED pattern: cloud gateway command, 4 blinks")
+        except (RequestError, OSError, ValueError):
+            self.complete(command_id, False)
+        return {"status": self.receipts[command_id][0]}
+
+    def status(self, raw_id):
+        if not 1 <= len(raw_id) <= 96 or any(byte > 127 for byte in raw_id):
+            raise RequestError(404, "gateway-command-not-found")
+        command_id = raw_id.decode()
+        self.prune()
+        if not valid_gateway_id(command_id) or command_id not in self.receipts:
+            raise RequestError(404, "gateway-command-not-found")
+        return {"status": self.receipts[command_id][0]}
+
+
 def read_chunk(client, size, deadline):
     remaining = ticks_diff(deadline, ticks_ms())
     if remaining <= 0:
@@ -133,7 +188,7 @@ def authorized(header, expected):
     return difference == 0
 
 
-def read_command(client, headers, body, deadline):
+def read_command(client, headers, body, deadline, fields=("capability", "value")):
     content_type = headers.get(b"content-type", b"").split(b";", 1)[0].strip().lower()
     if content_type != b"application/json":
         raise RequestError(415, "json-required")
@@ -156,12 +211,12 @@ def read_command(client, headers, body, deadline):
         command = json.loads(body)
     except ValueError:
         raise RequestError(400, "invalid-command")
-    if type(command) is not dict or len(command) != 2 or "value" not in command:
+    if type(command) is not dict or len(command) != len(fields) or any(field not in command for field in fields):
         raise RequestError(400, "invalid-command")
     return command
 
 
-def route(client, manifest, expected_token, indicator):
+def route(client, manifest, expected_token, indicator, gateway=None):
     deadline = ticks_add(ticks_ms(), REQUEST_TIMEOUT_MS)
     method, path, headers, body = read_headers(client, deadline)
     if method == b"GET" and path == ROUTE_PREFIX + b"manifest":
@@ -169,10 +224,17 @@ def route(client, manifest, expected_token, indicator):
     read = method == b"GET" and path == ROUTE_PREFIX + b"state"
     write = method == b"POST" and path == ROUTE_PREFIX + b"command"
     pair = method == b"POST" and path == ROUTE_PREFIX + b"pair"
-    if not (read or write or pair):
+    gateway_submit = gateway is not None and method == b"POST" and path == GATEWAY_COMMAND
+    gateway_status = gateway is not None and method == b"GET" and path.startswith(GATEWAY_STATUS_PREFIX)
+    if not (read or write or pair or gateway_submit or gateway_status):
         raise RequestError(404, "not-found")
     if not authorized(headers.get(b"authorization"), expected_token):
         raise RequestError(401, "token-required")
+    if gateway_submit:
+        command = read_command(client, headers, body, deadline, ("id", "capability", "value"))
+        return gateway.submit(command)
+    if gateway_status:
+        return gateway.status(path[len(GATEWAY_STATUS_PREFIX):])
     if pair:
         if body or b"transfer-encoding" in headers or headers.get(b"content-length", b"0") != b"0":
             raise RequestError(400, "expected-empty-body")
@@ -190,10 +252,10 @@ def route(client, manifest, expected_token, indicator):
     return {"power": False}
 
 
-def serve_client(client, manifest, expected_token, indicator):
+def serve_client(client, manifest, expected_token, indicator, gateway=None):
     try:
         try:
-            result = route(client, manifest, expected_token, indicator)
+            result = route(client, manifest, expected_token, indicator, gateway)
             status = 200
         except RequestError as error:
             status, message = error.args
@@ -317,6 +379,11 @@ def run():
     discovery = None
     active_ip = None
     cloud = None
+    gateway = None
+    if (getattr(kontur_config, "CLOUD_GATEWAY", False) is True
+            and not getattr(kontur_config, "CLOUD_URL", "") and not getattr(kontur_config, "CLOUD_TOKEN", "")):
+        gateway = GatewayCommands(indicator)
+        print("Cloud gateway mode enabled")
     retry_at = ticks_ms()
     waiting_at = ticks_add(ticks_ms(), 15000)
     try:
@@ -369,7 +436,7 @@ def run():
                 except OSError:
                     pass
                 else:
-                    serve_client(client, manifest, expected_token, indicator)
+                    serve_client(client, manifest, expected_token, indicator, gateway)
             sleep_ms(10)
     finally:
         indicator.reset()
