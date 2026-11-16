@@ -1,10 +1,10 @@
 'use strict';
 
-const cacheName = 'kontur-shell-1.5.2';
+const cacheName = 'kontur-shell-1.5.3';
 const shell = [
-  './','./index.html','./offline.html','./styles.css?v=1.5.2','./app.js?v=1.5.2','./i18n.js?v=1.5.2','./home-api.js?v=1.5.2','./room-scene.js?v=1.5.2','./shared-home.js?v=1.5.2',
-  './storage.js?v=1.5.2','./platform.js?v=1.5.2','./manifest.webmanifest',
-  './icons/kontur-192.png','./icons/kontur-512.png','./automation.js?v=1.5.2','./lan.js?v=1.5.2','./images/room-dome.png'
+  './','./index.html','./offline.html','./styles.css?v=1.5.3','./app.js?v=1.5.3','./i18n.js?v=1.5.3','./home-api.js?v=1.5.3','./room-scene.js?v=1.5.3','./shared-home.js?v=1.5.3',
+  './storage.js?v=1.5.3','./platform.js?v=1.5.3','./manifest.webmanifest',
+  './icons/kontur-192.png','./icons/kontur-512.png','./automation.js?v=1.5.3','./lan.js?v=1.5.3','./cloud.js?v=1.5.3','./images/room-dome.png'
 ];
 const shellUrls = new Set(shell.map(path => new URL(path,self.registration.scope).href));
 

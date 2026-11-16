@@ -177,7 +177,7 @@ class Relay:
             if not self.online(now):
                 raise RelayError(409, "device-offline")
             if sum(command.status == "pending" for command in self.commands.values()) >= MAX_PENDING:
-                raise RelayError(409, "command-queue-full")
+                raise RelayError(429, "command-queue-full")
             if len(self.commands) >= MAX_COMMANDS:
                 oldest = next(key for key, command in self.commands.items() if command.status != "pending")
                 del self.commands[oldest]
@@ -228,8 +228,10 @@ class Handler(BaseHTTPRequestHandler):
     sys_version = ""
 
     def log_request(self, code="-", size="-"):
-        # Do not log request targets, headers or secrets from malformed callers.
         self.log_message("%s %s", self.command, code)
+
+    def log_error(self, *_):
+        self.log_message("Invalid or incomplete connection")
 
     def send_json(self, status, body, origin=None):
         payload = json.dumps(body, ensure_ascii=False, allow_nan=False).encode("utf-8")
@@ -275,6 +277,7 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path_only()
         config = self.server.config
         relay = self.server.relay
+        origins = self.headers.get_all("Origin", [])
         origin = self.headers.get("Origin")
         cors = None
         try:
@@ -286,7 +289,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(200, relay.poll(self.read_json(MAX_DEVICE_BODY)))
             if owner_method(path) != self.command:
                 raise RelayError(404, "not-found")
-            if origin is not None and origin != config.origin:
+            if origins and origins != [config.origin]:
                 raise RelayError(403, "wrong-origin")
             cors = origin
             if not authenticate(self.headers.get("Authorization"), config.owner_hash):
@@ -307,7 +310,7 @@ class Handler(BaseHTTPRequestHandler):
         expected = owner_method(self.path_only())
         headers = {part.strip().lower() for part in self.headers.get("Access-Control-Request-Headers", "").split(",")}
         headers.discard("")
-        if (origin != self.server.config.origin or expected is None
+        if (self.headers.get_all("Origin", []) != [self.server.config.origin] or expected is None
                 or self.headers.get("Access-Control-Request-Method") != expected
                 or not headers <= {"authorization", "content-type"}):
             return self.send_json(403, {"error": "wrong-origin"})

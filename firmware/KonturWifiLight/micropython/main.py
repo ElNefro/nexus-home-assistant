@@ -21,7 +21,7 @@ RETRY_MS = 5000
 BLINK_ON_MS = 140
 BLINK_OFF_MS = 140
 BETWEEN_BURSTS_MS = 320
-MAX_PENDING_BLINKS = 8
+MAX_PENDING_BURSTS = 8
 DEVICE_NAME = "Светильник ESP32"
 ROUTE_PREFIX = b"/kontur/v1/"
 TOKEN_CHARACTERS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
@@ -47,12 +47,13 @@ class Indicator:
         self.idle_level = int(active_low)
         self.pin = Pin(pin, Pin.OUT, value=self.idle_level)
         self.pending = []
+        self.on_done = None
         self.reset()
 
-    def blink(self, count):
-        if len(self.pending) >= MAX_PENDING_BLINKS:
+    def blink(self, count, on_done=None):
+        if len(self.pending) >= MAX_PENDING_BURSTS:
             raise RequestError(503, "blink-queue-full")
-        self.pending.append(count)
+        self.pending.append((count, on_done))
         self.poll(ticks_ms())
 
     def poll(self, now):
@@ -64,9 +65,12 @@ class Indicator:
             self.remaining -= 1
             pause = BLINK_OFF_MS if self.remaining else BETWEEN_BURSTS_MS
             self.next_edge = ticks_add(now, pause)
+            if not self.remaining and self.on_done is not None:
+                done, self.on_done = self.on_done, None
+                done(True)
             return
         if not self.remaining and self.pending:
-            self.remaining = self.pending.pop(0)
+            self.remaining, self.on_done = self.pending.pop(0)
         if self.remaining:
             self.pin.value(1 - self.idle_level)
             self.lit = True
@@ -75,11 +79,17 @@ class Indicator:
             self.next_edge = None
 
     def reset(self):
-        self.pending.clear()
         self.next_edge = None
         self.remaining = 0
         self.lit = False
         self.pin.value(self.idle_level)
+        if self.on_done is not None:
+            done, self.on_done = self.on_done, None
+            done(False)
+        for _, done in self.pending:
+            if done is not None:
+                done(False)
+        self.pending.clear()
 
 
 def read_chunk(client, size, deadline):
@@ -257,6 +267,35 @@ def manifest_for(device_id):
     }
 
 
+def start_cloud(manifest):
+    url = getattr(kontur_config, "CLOUD_URL", "")
+    token = getattr(kontur_config, "CLOUD_TOKEN", "")
+    if not url and not token:
+        return None
+    try:
+        from kontur_cloud import CloudClient
+        ca_file = getattr(kontur_config, "CLOUD_CA_FILE", "/kontur-cloud-ca.pem")
+        return CloudClient(url, token, ca_file, manifest)
+    except (ImportError, ValueError, OSError, MemoryError) as error:
+        print("Cloud configuration unavailable:", type(error).__name__)
+        return None
+
+
+def handle_cloud_command(cloud, indicator):
+    command = cloud.take_command()
+    if command is None:
+        return
+    command_id, capability, value = command
+    if capability != "power" or value is not True:
+        cloud.complete(command_id, False)
+        return
+    try:
+        indicator.blink(4, lambda ok: cloud.complete(command_id, ok))
+        print("LED pattern: cloud command, 4 blinks")
+    except (RequestError, OSError, ValueError):
+        cloud.complete(command_id, False)
+
+
 def run():
     led_gpio = kontur_config.LED_GPIO
     led_active_low = getattr(kontur_config, "LED_ACTIVE_LOW", False)
@@ -277,22 +316,27 @@ def run():
     listener = None
     discovery = None
     active_ip = None
+    cloud = None
     retry_at = ticks_ms()
     waiting_at = ticks_add(ticks_ms(), 15000)
     try:
         wlan.active(True)
         wlan.connect(kontur_config.WIFI_SSID, kontur_config.WIFI_PASSWORD)
+        cloud = start_cloud(manifest)
         print("Connecting %s to Wi-Fi" % device_id)
         while True:
             now = ticks_ms()
             ip = wlan.ifconfig()[0] if wlan.isconnected() else None
             if ip != active_ip:
+                if cloud is not None:
+                    cloud.set_connected(ip is not None)
                 if discovery is not None:
                     discovery.close()
                     discovery = None
                 if listener is not None:
                     listener.close()
                     listener = None
+                if active_ip is not None:
                     indicator.reset()
                     print("Wi-Fi connection changed")
                 active_ip = ip
@@ -317,6 +361,8 @@ def run():
             if discovery is not None:
                 poll_discovery(discovery)
             indicator.poll(now)
+            if cloud is not None:
+                handle_cloud_command(cloud, indicator)
             if listener is not None:
                 try:
                     client, _ = listener.accept()
@@ -327,6 +373,8 @@ def run():
             sleep_ms(10)
     finally:
         indicator.reset()
+        if cloud is not None:
+            cloud.close()
         if discovery is not None:
             discovery.close()
         if listener is not None:

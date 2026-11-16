@@ -2,7 +2,7 @@
 
 (function expose(root) {
   const kinds = ['humidifier','purifier','climate','light','relay','feeder','other'];
-  const transports = ['ble-test','ble','lan'];
+  const transports = ['ble-test','ble','lan','cloud'];
   const periods = [15,30,60,120,240,480,1440];
   const time = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
   const valueId = /^[a-z][a-z0-9_-]{0,39}$/;

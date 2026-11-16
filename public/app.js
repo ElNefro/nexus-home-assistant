@@ -174,6 +174,7 @@ function tile(title,detail,icon,tone,action) {
 }
 function deviceStatus(device) {
   if (device.transport === 'lan') return device.online ? t('Подключён по Wi-Fi') : t('Добавлен по Wi-Fi') + ' · ' + t('Не в сети');
+  if (device.transport === 'cloud') return t(device.online ? 'Подключён через интернет' : 'Не в сети');
   return t('Не в сети');
 }
 function deviceTile(device,back) {
@@ -364,7 +365,7 @@ function renderProfile() {
 
 
   return [heading(t('Настройки аккаунта'),t('Профиль'),t('Имя и роль в доме')),
-    sharedHome.profile(),profile,preferences,sharedHome.canEdit() ? backup : null].filter(Boolean);
+    sharedHome.profile(),cloudProfile(),profile,preferences,sharedHome.canEdit() ? backup : null].filter(Boolean);
 }
 async function installApp() {
   try {
@@ -535,6 +536,10 @@ function control(device,capability) {
   if (capability.momentary === true) {
     const action = button(t('Включить'),'primary',async () => {
       if (!device.online || busyDevices.has(device.id)) return;
+      if (device.transport === 'cloud') {
+        await cloudCommand(device,capability);
+        return;
+      }
       if (!sharedHome.connected()) {
         await transmit(device,capability.id,true);
         return;
@@ -634,6 +639,9 @@ function renderDevice(device) {
     const connection = node('section','panel');
     connection.append(button(t('Найти в сети'),'primary',() => addDevice(data.rooms.find(room => room.id === device.roomId))));
     content.append(connection);
+  }
+  if (device.transport === 'cloud' && konturCloud.available() && !konturCloud.connected()) {
+    content.append(button(t('Войти по коду владельца'),'primary',() => cloudSignIn()));
   }
   if (gauges.childElementCount) {
     panel.prepend(node('h2','',t('Показатели работы')));
@@ -858,7 +866,170 @@ async function transmit(device,capability,value,automatic=false) {
     if (!dialog.open && byId('schedule-value') !== document.activeElement) render();
   }
 }
+
+function cloudProfile() {
+  if (!konturCloud.available()) return null;
+  const panel = node('section','panel profile-section');
+  panel.append(node('h2','',t('Управление через интернет')));
+  if (konturCloud.connected()) {
+    panel.append(node('p','muted',t('Вход по коду владельца выполнен.')),
+      button(t('Выйти из управления'),'ghost',() => {
+        konturCloud.disconnect();
+        syncCloudPresence([]);
+        render();
+      }));
+  } else panel.append(button(t('Войти по коду владельца'),'primary',() => cloudSignIn()));
+  return panel;
+}
+
+function cloudError(error) {
+  if (error.message === 'cloud-sign-in') return t('Войди заново и проверь код владельца.');
+  if (error.message === 'cloud-offline') return t('Прибор сейчас не в сети.');
+  if (error.message === 'cloud-unconfirmed') return t('Прибор не подтвердил команду.');
+  return t('Сервер управления недоступен. Попробуй ещё раз.');
+}
+
+function syncCloudPresence(records) {
+  let changed = false;
+  const present = new Map(records.map(record => [record.id,record]));
+  for (const device of data.devices.filter(item => item.transport === 'cloud')) {
+    const record = present.get(device.id.slice('cloud-'.length));
+    const online = record?.online === true;
+    if (record && JSON.stringify(device.capabilities) !== JSON.stringify(record.capabilities)) {
+      device.capabilities = record.capabilities;
+      changed = true;
+    }
+    if (device.online !== online) {
+      device.online = online;
+      changed = true;
+    }
+  }
+  if (changed && !dialog.open) render();
+}
+
+function cloudSignIn(room) {
+  const {form,error} = formModal(t('Войти по коду владельца'),t('Войти'));
+  const input = node('input');
+  input.type = 'password';
+  input.required = true;
+  input.maxLength = 256;
+  input.autocomplete = 'off';
+  field(form,error,t('Код владельца'),'cloud-owner-code',input);
+  const feedback = node('p','field-note');
+  feedback.setAttribute('role','status');
+  form.insertBefore(feedback,error);
+  const submit = form.querySelector('[type=submit]');
+  form.addEventListener('submit',async event => {
+    event.preventDefault();
+    if (submit.disabled) return;
+    const code = input.value.trim();
+    input.value = '';
+    input.disabled = true;
+    submit.disabled = true;
+    error.hidden = true;
+    feedback.textContent = t('Подключаемся к серверу. Первый запуск может занять минуту.');
+    try {
+      const records = await konturCloud.connect(code);
+      syncCloudPresence(records);
+      if (!dialog.open || !form.isConnected) return;
+      if (room) showCloudDevices(room,records);
+      else {
+        dialog.close();
+        render();
+        status(t('Вход по коду владельца выполнен.'));
+      }
+    } catch (failure) {
+      if (form.isConnected && dialog.open) showError(error,cloudError(failure));
+    } finally {
+      feedback.textContent = '';
+      input.disabled = false;
+      submit.disabled = false;
+      if (!error.hidden && dialog.open && form.isConnected) input.focus();
+    }
+  });
+  input.focus();
+}
+
+function showCloudDevices(room,initial) {
+  const content = modal(t('Подключение прибора'));
+  const results = node('div','device-links');
+  results.setAttribute('aria-live','polite');
+  const refresh = button(t('Обновить список'),'ghost',() => load());
+  async function load(records) {
+    refresh.disabled = true;
+    results.replaceChildren(node('p','muted',t('Проверяем приборы на сервере…')));
+    try {
+      const devices = records ?? await konturCloud.devices(undefined,75_000);
+      if (!results.isConnected || !dialog.open) return;
+      syncCloudPresence(devices);
+      const known = new Set(data.devices.map(device => device.id));
+      const available = devices.filter(device => !known.has('cloud-' + device.id));
+      results.replaceChildren(...available.map(device => {
+        const kind = kindFor(device);
+        return tile(device.name,t(device.online ? 'В сети' : 'Не в сети'),kind.icon,kind.tone,() => {
+          const id = 'cloud-' + device.id;
+          if (data.devices.some(item => item.id === id) || !data.rooms.some(item => item.id === room.id)) return;
+          data.devices.push({...device,id,roomId:room.id,transport:'cloud',state:{}});
+          complete(t('Прибор подключён к комнате «{name}».',{name:roomName(room)}));
+        });
+      }));
+      if (!available.length) results.append(node('p','muted',t('Новых приборов на сервере пока нет.')));
+    } catch (failure) {
+      if (!results.isConnected || !dialog.open) return;
+      results.replaceChildren(node('p','muted',cloudError(failure)));
+      if (!konturCloud.connected()) results.append(button(t('Войти по коду владельца'),'primary',() => cloudSignIn(room)));
+    } finally {
+      refresh.disabled = false;
+    }
+  }
+  const actions = node('div','actions');
+  actions.append(button(t('Закрыть'),'ghost',() => dialog.close()));
+  content.append(sectionHead(t('Приборы на сервере'),refresh),results,actions);
+  load(initial);
+}
+
+async function cloudCommand(device,capability) {
+  busyDevices.add(device.id);
+  status(t('Отправляем команду…'));
+  render();
+  try {
+    await konturCloud.command(device.id.slice('cloud-'.length),capability.id);
+    status(t('Плата подтвердила команду.'));
+  } catch (failure) {
+    status(cloudError(failure));
+    if (failure.message === 'cloud-offline') device.online = false;
+    if (!konturCloud.connected()) syncCloudPresence([]);
+  } finally {
+    busyDevices.delete(device.id);
+    if (!dialog.open) render();
+  }
+}
+
+let refreshingCloud = false;
+async function pollCloud() {
+  if (!konturCloud.connected() || refreshingCloud || dialog.open) return;
+  refreshingCloud = true;
+  let records = [];
+  try {
+    records = await konturCloud.devices();
+  } catch {
+    // A network error must not leave disconnected devices enabled.
+  } finally {
+    refreshingCloud = false;
+  }
+  if (konturCloud.connected()) syncCloudPresence(records);
+  else {
+    syncCloudPresence([]);
+    if (!dialog.open) render();
+  }
+}
+
 function addDevice(room) {
+  if (konturCloud.available()) {
+    if (konturCloud.connected()) showCloudDevices(room);
+    else cloudSignIn(room);
+    return;
+  }
   const content = modal(t('Подключение прибора'));
   const lanResults = node('div','device-links');
   lanResults.setAttribute('aria-live','polite');
@@ -993,3 +1164,4 @@ runSchedules();
 notifyWarnings();
 setInterval(runSchedules,1000);
 setInterval(pollLan,5000);
+if (konturCloud.available()) setInterval(pollCloud,7000);
