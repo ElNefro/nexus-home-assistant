@@ -4,3 +4,21 @@ services:
     runtime: static
     buildCommand: "true"
     staticPublishPath: ./public
+  - type: web
+    name: nexus-home-assistant-api
+    runtime: python
+    plan: free
+    buildCommand: "true"
+    startCommand: python cloud_server.py
+    healthCheckPath: /healthz
+    envVars:
+      - key: KONTUR_CLOUD_HOST
+        value: 0.0.0.0
+      - key: KONTUR_PANEL_ORIGIN
+        value: https://nexus-home-assistant.onrender.com
+      - key: KONTUR_OWNER_SHA256
+        sync: false
+      - key: KONTUR_DEVICE_SHA256
+        sync: false
+      - key: KONTUR_DEVICE_ID
+        sync: false
