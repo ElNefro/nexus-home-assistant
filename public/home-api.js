@@ -41,8 +41,15 @@
       options.body = JSON.stringify(body);
     }
     try {
-      const response = await fetch((remote ? apiOrigin : '.') + '/api/' + path,options);
-      const value = await response.json();
+      let response;
+      try {
+        response = await fetch((remote ? apiOrigin : '.') + '/api/' + path,options);
+      } catch (error) {
+        throw new Error(error.name === 'AbortError' ? 'request-timeout' : 'network-unavailable');
+      }
+      const value = await response.json().catch(() => {
+        throw new Error(response.status >= 500 ? 'homes-unavailable' : 'request-failed');
+      });
       if (!response.ok) {
         if (remote && path === 'account/session' && response.status === 401 && sessionToken === previousToken) remember();
         throw new Error(value.error ?? 'request-failed');

@@ -4,6 +4,7 @@ const sharedHome = (() => {
   const api = konturHome.request;
   let user;
   let homes = [];
+  let accountRevision = 0;
   let home;
   let guestData;
   let available = false;
@@ -17,7 +18,14 @@ const sharedHome = (() => {
   function message(error) {
     const errors = {
       'invalid-login':'Проверь адрес и пароль.',
-      'email-in-use':'Аккаунт с таким адресом уже существует.',
+      'email-in-use':'Этот адрес уже зарегистрирован. Выбери «Войти» или «Восстановить доступ».',
+      'invalid-email':'Введи электронную почту полностью, включая часть после @.',
+      'invalid-name':'Введи имя длиной до 60 символов.',
+      'invalid-password':'Новый пароль должен содержать от 10 до 128 символов.',
+      'homes-unavailable':'Сервер аккаунтов сейчас недоступен. Попробуй ещё раз через минуту.',
+      'try-again-later':'Сервер занят. Попробуй ещё раз через несколько секунд.',
+      'request-timeout':'Сервер долго отвечает. Попробуй ещё раз.',
+      'network-unavailable':'Нет связи с сервером. Проверь интернет и попробуй ещё раз.',
       'invalid-recovery':'Адрес или код восстановления не подошёл.',
       'invalid-invitation':'Приглашение недействительно или уже использовано.',
       'revision-conflict':'Дом изменился в другой вкладке. Загружаем свежие данные.',
@@ -83,13 +91,16 @@ const sharedHome = (() => {
   }
 
   function useAccount(result) {
+    accountRevision++;
     user = result.user;
     homes = result.homes ?? [];
     available = true;
   }
 
   async function session() {
-    useAccount(await api('account/session'));
+    const revision = accountRevision;
+    const result = await api('account/session');
+    if (accountRevision === revision) useAccount(result);
   }
 
   function openSnapshot(snapshot) {
@@ -207,25 +218,40 @@ const sharedHome = (() => {
     status(t('Прибор подключён к комнате «{name}».',{name:roomName(room)}));
   }
 
-  function fieldInput(form,error,caption,id,type='text') {
+  function fieldInput(form,error,caption,id,type='text',options={}) {
     const input = node('input');
     input.type = type;
     input.required = true;
     input.maxLength = type === 'email' ? 254 : 128;
-    if (type === 'password') input.autocomplete = id === 'shared-password' ? 'current-password' : 'off';
+    if (type === 'password') input.autocomplete = 'off';
+    const {hint,...attributes} = options;
+    Object.assign(input,attributes);
     field(form,error,t(caption),id,input);
+    if (hint) {
+      const description = node('p','field-note',t(hint));
+      description.id = id + '-hint';
+      input.setAttribute('aria-describedby',description.id);
+      form.insertBefore(description,error);
+    }
     return input;
   }
 
-  function openForm(title,action,fields,handler) {
+  function openForm(title,action,fields,handler,waiting) {
     const {form,error} = formModal(t(title),t(action));
-    const inputs = fields.map(([caption,key,type]) => fieldInput(form,error,caption,'shared-' + key,type));
+    const inputs = fields.map(([caption,key,type,options]) => fieldInput(form,error,caption,'shared-' + key,type,options));
+    const feedback = waiting ? node('p','field-note',t(waiting)) : null;
+    if (feedback) {
+      feedback.setAttribute('role','status');
+      feedback.hidden = true;
+      form.insertBefore(feedback,error);
+    }
     form.addEventListener('submit',async event => {
       event.preventDefault();
       const submit = form.querySelector('[type=submit]');
       if (submit.disabled) return;
       error.hidden = true;
       submit.disabled = true;
+      if (feedback) feedback.hidden = false;
       try {
         const values = Object.fromEntries(fields.map(([,key,type],index) => [
           key,type === 'password' ? inputs[index].value : inputs[index].value.trim()
@@ -235,18 +261,24 @@ const sharedHome = (() => {
         showError(error,message(errorValue));
       } finally {
         submit.disabled = false;
+        if (feedback) feedback.hidden = true;
       }
     });
     inputs[0]?.focus();
   }
 
   function auth(mode) {
-    const email = ['Электронная почта','email','email'];
-    const password = ['Пароль','password','password'];
+    const email = ['Электронная почта','email','email',{autocomplete:'email'}];
+    const password = ['Пароль','password','password',{autocomplete:'current-password'}];
+    const newPassword = {autocomplete:'new-password',minLength:10,hint:'От 10 до 128 символов.'};
     const config = {
-      register:['Создать аккаунт','Зарегистрироваться',[['Имя','name'],email,password]],
+      register:['Создать аккаунт','Зарегистрироваться',[
+        ['Имя','name','text',{maxLength:60,autocomplete:'name'}],email,['Пароль','password','password',newPassword]
+      ]],
       login:['Войти в аккаунт','Войти',[email,password]],
-      recover:['Восстановить доступ','Изменить пароль',[email,['Код восстановления','recoveryCode'],['Новый пароль','password','password']]]
+      recover:['Восстановить доступ','Изменить пароль',[
+        email,['Код восстановления','recoveryCode'],['Новый пароль','password','password',newPassword]
+      ]]
     };
     const [title,action,fields] = config[mode];
     openForm(title,action,fields,async values => {
@@ -266,7 +298,7 @@ const sharedHome = (() => {
         content.append(node('p','sub',t('Сохрани этот код. Он понадобится, если забудешь пароль.')),
           node('code','recovery-code',result.recoveryCode),button(t('Закрыть'),'primary',() => dialog.close()));
       }
-    });
+    },'Ждём ответа сервера…');
   }
 
   function create() {
