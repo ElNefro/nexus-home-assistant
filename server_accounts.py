@@ -183,11 +183,14 @@ def clean_capability(value):
     require(isinstance(cap_id, str) and CAPABILITY_ID.fullmatch(cap_id) and kind in ("switch", "slider", "sensor"),
             400, "invalid-home-data")
     result = {"id": cap_id, "type": kind, "label": name(value.get("label"))}
+    if "momentary" in value:
+        require(type(value["momentary"]) is bool and kind == "switch", 400, "invalid-home-data")
     if kind == "switch" and value.get("momentary") is True:
         result["momentary"] = True
     for key, limit in (("unit", 12), ("description", 500)):
-        text = value.get(key)
-        if short_text(text, limit):
+        if key in value:
+            text = value[key]
+            require(short_text(text, limit), 400, "invalid-home-data")
             result[key] = text
     low, high, step = (value.get(key) for key in ("min", "max", "step"))
     if kind == "slider":
@@ -262,6 +265,12 @@ def clean_home(value, previous=None):
             "capabilities": caps, "state": clean_readings(caps, device.get("state", {})),
             "online": device.get("online") is True
         }
+        if "commandFeedback" in device:
+            require(device["commandFeedback"] == "transmitted", 400, "invalid-home-data")
+            entry["commandFeedback"] = device["commandFeedback"]
+        if "description" in device:
+            require(short_text(device["description"], 500), 400, "invalid-home-data")
+            entry["description"] = device["description"]
         transport = device.get("transport")
         if transport in ("ble", "ble-test", "lan", "cloud"):
             entry.update(transport=transport, online=False)
@@ -528,6 +537,11 @@ class Accounts:
                 for key in ("kind", "transport", "capabilities", "state", "online", "lastSeen"):
                     if key in old:
                         updated[key] = old[key]
+                for key in ("commandFeedback", "description"):
+                    if key in old:
+                        updated[key] = old[key]
+                    else:
+                        updated.pop(key, None)
                 if not has_schedule_power(updated["capabilities"]):
                     updated.pop("schedule", None)
         self.store_home(db, home["id"], state)
@@ -677,7 +691,8 @@ class Accounts:
                 "rooms": data["rooms"], "devices": [{
                     "id": device_id, "roomId": room_id, "transport": transport,
                     "name": manifest.get("name"), "kind": manifest.get("kind"),
-                    "capabilities": manifest.get("capabilities"), "state": state
+                    "capabilities": manifest.get("capabilities"), "state": state,
+                    **{key: manifest[key] for key in ("commandFeedback", "description") if key in manifest}
                 }]
             })
             device = new_data["devices"][0]

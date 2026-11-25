@@ -19,7 +19,7 @@ from urllib.parse import urlsplit
 from ifaddr import get_adapters
 from zeroconf import IPVersion, ServiceBrowser, ServiceListener, Zeroconf
 
-from server_accounts import Accounts, AccountError
+from server_accounts import Accounts, AccountError, short_text
 from server_automation import decision
 
 
@@ -56,7 +56,13 @@ def normalize_manifest(value):
         raise ValueError("manifest")
     pair_signal = value.get("pairSignal", False)
     requires_token = value.get("requiresToken") is not False
-    if type(pair_signal) is not bool or (pair_signal and not requires_token):
+    requires_password = value.get("requiresPassword", False)
+    if (type(requires_password) is not bool or (requires_password and requires_token)
+            or type(pair_signal) is not bool or (pair_signal and not (requires_token or requires_password))):
+        raise ValueError("manifest")
+    if "commandFeedback" in value and value["commandFeedback"] != "transmitted":
+        raise ValueError("manifest")
+    if "description" in value and not short_text(value["description"], 500):
         raise ValueError("manifest")
     seen = set()
     for entry in capabilities:
@@ -68,7 +74,7 @@ def normalize_manifest(value):
                 or cap_type not in ("switch", "slider", "sensor")):
             raise ValueError("capability")
         seen.add(cap_id)
-        if any(not isinstance(entry.get(key, ""), str) or len(entry.get(key, "")) > limit
+        if any(not short_text(entry.get(key, ""), limit)
                for key, limit in (("unit", 12), ("description", 500))):
             raise ValueError("capability")
         if "momentary" in entry and (type(entry["momentary"]) is not bool or cap_type != "switch"):
@@ -81,14 +87,25 @@ def normalize_manifest(value):
                 "capabilities": capabilities, "requiresToken": requires_token}
     if pair_signal:
         manifest["pairSignal"] = True
+    if requires_password:
+        manifest["requiresPassword"] = True
+    for key in ("commandFeedback", "description"):
+        if key in value:
+            manifest[key] = value[key]
     return manifest
 
 
-def state_for(manifest, raw):
+def state_for(manifest, raw, command=False):
     if not isinstance(raw, dict):
         raise ValueError("state")
-    return {cap["id"]: raw[cap["id"]] for cap in manifest["capabilities"]
-            if cap["id"] in raw and valid_value(cap, raw[cap["id"]])}
+    result = {}
+    for capability in manifest["capabilities"]:
+        key = capability["id"]
+        if capability.get("momentary") is True and not command:
+            result[key] = False
+        elif key in raw and valid_value(capability, raw[key]):
+            result[key] = raw[key]
+    return result
 
 
 def valid_value(cap, value):
@@ -101,16 +118,18 @@ def valid_value(cap, value):
     return True
 
 
-def device_request(address, route, command=None, token=None):
+def device_request(address, route, command=None, token=None, password=None):
     headers = {"Accept": "application/json"}
     body = None
     method = "POST" if route == "pair" or command is not None else "GET"
     if command is not None:
         headers["Content-Type"] = "application/json"
         body = json.dumps(command, allow_nan=False).encode()
-    if token:
+    if password is not None:
+        headers["X-Kontur-Password"] = password
+    elif token:
         headers["Authorization"] = "Bearer " + token
-    connection = http.client.HTTPConnection(*address, timeout=1.6)
+    connection = http.client.HTTPConnection(*address, timeout=6 if command is not None else 1.6)
     try:
         connection.request(method, "/kontur/v1/" + route, body=body, headers=headers)
         response = connection.getresponse()
@@ -273,15 +292,18 @@ class Registry:
             manifest, address = self.discovered[device_id]
         if manifest.get("legacy"):
             raise ValueError("legacy")
-        if manifest["requiresToken"] and not token:
+        if (manifest["requiresToken"] or manifest.get("requiresPassword")) and not token:
             raise PermissionError("device-token")
         # Recheck identity before sending credentials to a discovered address.
         current = normalize_manifest(device_request(address, "manifest"))
         if current["id"] != device_id:
             raise ValueError("device-id")
         manifest = current
+        if (manifest["requiresToken"] or manifest.get("requiresPassword")) and not token:
+            raise PermissionError("device-token")
+        credentials = {"password" if manifest.get("requiresPassword") else "token": token}
         route = "pair" if manifest.get("pairSignal") else "state"
-        state = state_for(manifest, device_request(address, route, token=token))
+        state = state_for(manifest, device_request(address, route, **credentials))
         session_id = secrets.token_urlsafe(24)
         with self.lock:
             cutoff = time.monotonic() - 3600
@@ -307,8 +329,9 @@ class Registry:
             if cap is None or cap["type"] == "sensor" or not valid_value(cap, command.get("value")):
                 raise ValueError("invalid-command")
         with request_lock:
-            raw = device_request(address, "command" if command is not None else "state", command, token)
-        return {"state": state_for(manifest, raw)}
+            credentials = {"password" if manifest.get("requiresPassword") else "token": token}
+            raw = device_request(address, "command" if command is not None else "state", command, **credentials)
+        return {"state": state_for(manifest, raw, command=command is not None)}
 
 
 REGISTRY = Registry()
@@ -488,7 +511,10 @@ class Handler(SimpleHTTPRequestHandler):
             if handled is not None:
                 return self.reply(*handled)
             if path == "/api/pair":
-                device_id, token = value.get("id"), value.get("token", "")
+                device_id = value.get("id")
+                if "password" in value and "token" in value:
+                    raise ValueError("pair")
+                token = value.get("password", value.get("token", ""))
                 if (not isinstance(device_id, str) or not DEVICE_ID.fullmatch(device_id)
                         or not isinstance(token, str) or not re.fullmatch(r"[!-~]{0,128}", token)):
                     raise ValueError("pair")

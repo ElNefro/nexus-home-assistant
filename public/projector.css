@@ -1,0 +1,341 @@
+.projector-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 18px;
+  margin-block: 22px 12px;
+}
+
+.projector-controls > .projector-status { grid-column: 1 / -1; }
+.projector-controls > .projector-power { grid-column: 1 / -1; }
+.projector-power .projector-segments { max-width: 360px; }
+.projector-about { margin-top: 18px; color: var(--muted); font-size: 13px; }
+.projector-about summary { cursor: pointer; min-height: 44px; padding-block: 10px; }
+
+.projector-card {
+  min-width: 0;
+  padding: clamp(18px, 3vw, 26px);
+  border: 1px solid var(--edge);
+  border-radius: 26px;
+  background:
+    radial-gradient(ellipse at 85% 0%, #70457224, transparent 68%),
+    linear-gradient(145deg, #302344, #201a36);
+  box-shadow: inset 0 1px #ffffff09, 0 14px 36px #09051e30;
+}
+
+.projector-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 12px;
+}
+
+.projector-eyebrow {
+  margin: 0 0 5px;
+  color: var(--active);
+  font-size: 11px;
+  font-weight: 750;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+
+.projector-card-title {
+  margin: 0;
+  font-size: clamp(21px, 3vw, 25px);
+  line-height: 1.25;
+}
+
+.projector-caption,
+.projector-note {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.projector-selection {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-height: 28px;
+  margin: 0 0 14px;
+  color: var(--muted);
+  text-align: center;
+  font-size: 13px;
+}
+
+.projector-wheel {
+  position: relative;
+  isolation: isolate;
+  width: min(100%, 280px);
+  aspect-ratio: 1;
+  margin: 18px auto 10px;
+  border-radius: 50%;
+  --wheel-colors: conic-gradient(from -30deg, #ff5c83 0deg 60deg, #f6d765 60deg 120deg,
+    #79eaa0 120deg 180deg, #64dded 180deg 240deg, #7196ff 240deg 300deg, #d381fb 300deg 360deg);
+}
+
+.projector-wheel::before,
+.projector-wheel::after {
+  position: absolute;
+  z-index: -1;
+  content: '';
+  pointer-events: none;
+  inset: 10%;
+  border-radius: inherit;
+  background: var(--wheel-colors);
+  -webkit-mask-image: radial-gradient(closest-side, transparent 72%, #000 75%);
+  mask-image: radial-gradient(closest-side, transparent 72%, #000 75%);
+}
+
+.projector-wheel::before {
+  inset: 7%;
+  filter: blur(18px);
+  opacity: .62;
+  -webkit-mask-image: none;
+  mask-image: none;
+}
+
+.projector-wheel::after { opacity: .88; }
+
+.projector-swatch,
+.projector-white {
+  position: absolute;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 3px solid #ffffffa6;
+  border-radius: 50%;
+  box-shadow: 0 5px 14px #08051c55;
+  transform: translate(-50%, -50%);
+  transition: box-shadow .15s ease, border-color .15s ease;
+}
+
+.projector-swatch {
+  left: var(--x);
+  top: var(--y);
+  width: 48px;
+  height: 48px;
+  min-width: 44px;
+  min-height: 44px;
+  background: var(--swatch);
+  color: #191126;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.projector-white {
+  left: 50%;
+  top: 50%;
+  width: 76px;
+  height: 76px;
+  background: radial-gradient(circle at 35% 25%, #fff, #e9dff8);
+  color: #2d213c;
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.projector-swatch[aria-pressed=true],
+.projector-white[aria-pressed=true] {
+  border-color: #fff;
+  box-shadow: 0 0 0 4px #21172f, 0 0 0 6px #fff, 0 0 28px var(--swatch, #e9dff8);
+}
+
+.projector-swatch[aria-pressed=true]::after {
+  content: '✓';
+  font-size: 21px;
+  line-height: 1;
+}
+
+.projector-segments {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+  margin-block: 20px 0;
+  padding: 5px;
+  border: 1px solid #62507199;
+  border-radius: 18px;
+  background: #17122685;
+}
+
+.projector-choice {
+  min-width: 0;
+  min-height: 48px;
+  padding: 10px 8px;
+  border: 1px solid transparent;
+  border-radius: 13px;
+  background: transparent;
+  color: #ddd1eb;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.projector-choice[aria-pressed=true] {
+  background: var(--gradient-pink);
+  box-shadow: 0 3px 15px #f78edb27;
+  color: #2a1432;
+}
+
+.projector-effects {
+  margin-top: 22px;
+  padding-top: 20px;
+  border-top: 1px solid #5f496a80;
+}
+
+.projector-effects .projector-segments { margin-top: 12px; }
+
+.projector-mode-title {
+  margin: 0;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.projector-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.projector-sync {
+  min-height: 44px;
+  padding: 10px 12px;
+  border: 1px solid #6d5684;
+  border-radius: 13px;
+  background: #30233f;
+  color: #f1dced;
+  font-size: 13px;
+}
+
+.projector-calibration-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-block: 16px;
+}
+
+.projector-calibration-grid label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 46px;
+  margin: 0;
+  padding: 9px;
+  border: 1px solid #655079;
+  border-radius: 12px;
+  background: #1c152d;
+}
+
+.projector-calibration-grid input[type=checkbox] {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  accent-color: var(--active);
+}
+
+.projector-calibration-swatches {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-block: 16px;
+}
+
+.projector-calibration-swatches button {
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: 7px;
+  min-width: 0;
+  min-height: 64px;
+  padding: 9px 4px;
+  border: 1px solid #6b537d;
+  border-radius: 13px;
+  background: #1d162f;
+  color: var(--ink);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.projector-calibration-swatches button[aria-pressed=true] {
+  border-color: var(--active);
+  background: #563348;
+  box-shadow: inset 0 0 0 1px var(--active);
+}
+
+.projector-current-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--ink);
+}
+
+.projector-current-chip::before {
+  content: '';
+  flex: none;
+  width: 14px;
+  height: 14px;
+  border: 1px solid #ffffff80;
+  border-radius: 50%;
+  background: var(--swatch, #8b7d9d);
+}
+
+.projector-status {
+  min-height: 20px;
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.projector-controls button:disabled {
+  cursor: default;
+  filter: saturate(.55);
+  opacity: .45;
+}
+
+.projector-controls button[aria-disabled=true] { cursor: wait; opacity: .62; }
+
+.projector-controls button:focus-visible,
+.projector-calibration-swatches button:focus-visible {
+  outline: 3px solid #fff;
+  outline-offset: 4px;
+}
+
+@media (hover: hover) {
+  .projector-choice:not([aria-pressed=true]):not(:disabled):hover { background: #4d365c; }
+  .projector-sync:not(:disabled):hover { border-color: var(--active); background: #3b2b4d; }
+  .projector-swatch:not(:disabled):hover,
+  .projector-white:not(:disabled):hover { border-color: #fff; box-shadow: 0 0 24px var(--swatch, #e9dff8); }
+}
+
+@media (max-width: 720px) {
+  .projector-controls { grid-template-columns: minmax(0, 1fr); gap: 14px; margin-top: 18px; }
+  .projector-card { padding: 20px; border-radius: 23px; }
+}
+
+@media (max-width: 360px) {
+  .projector-card { padding: 16px; }
+  .projector-swatch { width: 44px; height: 44px; }
+  .projector-white { width: 64px; height: 64px; }
+  .projector-choice { font-size: 13px; }
+  .projector-calibration-swatches { gap: 5px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .projector-swatch, .projector-white { transition: none; }
+}
+
+@media (forced-colors: active) {
+  .projector-wheel::before, .projector-wheel::after { display: none; }
+  .projector-swatch, .projector-white, .projector-choice { border: 1px solid ButtonText; }
+  .projector-swatch[aria-pressed=true], .projector-white[aria-pressed=true],
+  .projector-choice[aria-pressed=true] { outline: 3px solid Highlight; outline-offset: 3px; }
+}

@@ -25,6 +25,11 @@
         item.max > item.min && item.step > 0 && item.step <= item.max - item.min);
   }
 
+  function deviceMetadata(item) {
+    return (item.commandFeedback === undefined || item.commandFeedback === 'transmitted') &&
+      (item.description === undefined || typeof item.description === 'string' && item.description.length <= 500);
+  }
+
   function cleanSchedule(source) {
     if (!object(source)) return undefined;
     const schedule = {};
@@ -56,7 +61,7 @@
     const roomIds = new Set(input.rooms.map(room => room.id));
     if (!uniqueItems(input.devices, item => object(item) && text(item.id,128) && text(item.name,60) &&
         roomIds.has(item.roomId) && Array.isArray(item.capabilities) && item.capabilities.length <= 20 &&
-        uniqueItems(item.capabilities,capability) && object(item.state))) {
+        uniqueItems(item.capabilities,capability) && object(item.state) && deviceMetadata(item))) {
       throw new Error('invalid-device');
     }
     return {
@@ -75,6 +80,7 @@
         }));
         return {
           id:device.id, name:device.name, roomId:device.roomId,
+          description:device.description, commandFeedback:device.commandFeedback,
           kind:kinds.includes(device.kind) ? device.kind : 'other',
           online:(!transport || trustedLive) && device.online === true,
           lastSeen:trustedLive && Number.isSafeInteger(device.lastSeen) ? device.lastSeen : undefined,
@@ -96,7 +102,7 @@
     return normalize(envelope.home);
   }
 
-  const api = {normalize, decodeBackup, capability};
+  const api = {normalize, decodeBackup, capability, deviceMetadata};
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.konturStorage = api;
 })(globalThis);

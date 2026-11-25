@@ -171,9 +171,9 @@ function sectionHead(title,action) {
   if (action) result.append(action);
   return result;
 }
-function list(items,emptyText) {
+function list(items,emptyText,className='stack') {
   if (!items.length) return node('p','empty',emptyText);
-  const result = node('div','stack');
+  const result = node('div',className);
   result.append(...items);
   return result;
 }
@@ -196,8 +196,37 @@ function deviceStatus(device) {
 }
 function deviceTile(device,back) {
   const kind = kindFor(device);
-  const connection = deviceStatus(device);
-  return tile(deviceName(device),t(kind.label) + ' · ' + connection,kind.icon,kind.tone,() => showDevice(device,back));
+  const card = button('','device-card',() => showDevice(device,back));
+  card.style.setProperty('--tone',kind.tone);
+  card.dataset.online = String(device.online === true);
+  const graphic = node('span','device-card-icon',kind.icon);
+  graphic.setAttribute('aria-hidden','true');
+  const connection = node('span','card-connection',t(device.online ? 'В сети' : 'Не в сети'));
+  const copy = node('span','card-copy');
+  const title = node('span','card-title',deviceName(device));
+  title.title = deviceName(device);
+  copy.append(node('span','card-category',t(kind.label)),title);
+  card.append(graphic,copy,connection);
+  return card;
+}
+function roomTile(room) {
+  const card = button('','room-card',() => showRoom(room));
+  card.dataset.current = String(room.id === roomId);
+  const visual = node('span','room-card-visual');
+  visual.setAttribute('aria-hidden','true');
+  const image = node('img');
+  image.src = './images/room-dome.png';
+  image.alt = '';
+  image.loading = 'lazy';
+  visual.append(image);
+  const arrow = node('span','card-open','↗');
+  arrow.setAttribute('aria-hidden','true');
+  const copy = node('span','card-copy');
+  const title = node('span','card-title',roomName(room));
+  title.title = roomName(room);
+  copy.append(title,node('span','room-card-count',deviceCount(roomDevices(room.id).length)));
+  card.append(visual,arrow,copy);
+  return card;
 }
 function gauge(metric,devices) {
   const sources = devices.filter(device => device.online && device.capabilities.some(item => item.id === metric.id && item.type === 'sensor') && Number.isFinite(device.state[metric.id]));
@@ -315,18 +344,15 @@ function renderDevices() {
     heading(roomName(room),t('Приборы'),''),
     sharedHome.enrollmentPanel(),
     sectionHead(t('Список приборов'),sharedHome.canEdit() ? button(t('＋ Добавить прибор'),'primary',() => addDevice(room)) : null),
-    list(devices.map(device => deviceTile(device)),t('В этой комнате пока нет приборов.'))
+    list(devices.map(device => deviceTile(device)),t('В этой комнате пока нет приборов.'),'card-grid')
   ].filter(Boolean);
 }
 function renderRooms() {
-  const rooms = data.rooms.map(room => {
-    const count = roomDevices(room.id).length;
-    return tile(roomName(room),deviceCount(count),'▦','var(--active)',() => showRoom(room));
-  });
+  const rooms = data.rooms.map(roomTile);
   return [
     heading(t('Настройки дома'),t('Комнаты'),''),
     sectionHead(t('Твои комнаты'),sharedHome.canEdit() ? button(t('＋ Создать комнату'),'primary',() => editRoom()) : null),
-    list(rooms,t('Комнат пока нет.'))
+    list(rooms,t('Комнат пока нет.'),'card-grid')
   ];
 }
 function showRoom(room) {
@@ -340,7 +366,7 @@ function renderRoom(room) {
   const actions = node('div','row-buttons');
   actions.append(button(t('Переименовать'),'ghost',() => editRoom(room,reopen)),button(t('Добавить прибор'),'primary',() => addDevice(room)));
   const devices = node('div','device-links');
-  devices.append(list(roomDevices(room.id).map(device => deviceTile(device,reopen)),t('В этой комнате пока нет приборов.')));
+  devices.append(list(roomDevices(room.id).map(device => deviceTile(device,reopen)),t('В этой комнате пока нет приборов.'),'card-grid'));
   if (sharedHome.canEdit()) settings.append(actions);
   settings.append(devices);
   content.append(settings);
@@ -552,8 +578,13 @@ function control(device,capability) {
   const value = Object.prototype.hasOwnProperty.call(device.state,capability.id) ? device.state[capability.id] : undefined;
   row.append(label);
   result.append(row);
+  if (capability.description) {
+    const description = node('p','field-note',t(capability.description));
+    description.id = 'control-description-' + capability.id;
+    result.append(description);
+  }
   if (capability.momentary === true) {
-    const action = button(t('Включить'),'primary',async () => {
+    const submit = async () => {
       if (!device.online || busyDevices.has(device.id)) return;
       if (!sharedHome.connected()) {
         await transmit(device,capability.id,true);
@@ -567,8 +598,16 @@ function control(device,capability) {
         busyDevices.delete(device.id);
         if (!dialog.open) render();
       }
+    };
+    const action = button(t(capability.id === 'power' ? 'Включить' : 'Отправить'),'primary',() => {
+      if (!device.online || busyDevices.has(device.id)) return;
+      if (capability.id === 'purple_from_white' && device.commandFeedback === 'transmitted') {
+        confirmPurpleCommand(device,submit);
+      } else void submit();
     });
     action.id = 'device-action-' + capability.id;
+    action.setAttribute('aria-label',capabilityLabel(device,capability) + ' · ' + t(capability.id === 'power' ? 'Включить' : 'Отправить'));
+    if (capability.description) action.setAttribute('aria-describedby','control-description-' + capability.id);
     action.disabled = !device.online;
     if (busyDevices.has(device.id)) action.setAttribute('aria-disabled','true');
     row.append(action);
@@ -604,6 +643,27 @@ function control(device,capability) {
   }
   return result;
 }
+
+function confirmPurpleCommand(device,send) {
+  const {form,error} = formModal(t('Подготовь проектор'),t('Отправить'));
+  form.prepend(node('p','sub',t('Перед отправкой установи чистый белый свет и выключи лазер.')));
+  const check = node('input');
+  const submit = form.querySelector('[type=submit]');
+  check.type = 'checkbox';
+  check.required = true;
+  submit.disabled = true;
+  check.addEventListener('change',() => { submit.disabled = !check.checked; });
+  const label = node('label','shared-check');
+  label.append(check,document.createTextNode(t('На проекторе чистый белый свет, лазер выключен.')));
+  form.insertBefore(label,error);
+  form.addEventListener('submit',event => {
+    event.preventDefault();
+    if (!check.checked || !device.online || busyDevices.has(device.id)) return;
+    dialog.close();
+    void send();
+  });
+  check.focus();
+}
 function showDevice(device,back) {
   openDetail('device',device.id,back ? device.roomId : '');
 }
@@ -614,6 +674,7 @@ function renderDevice(device) {
     else navigate(page);
   }));
   const kind = kindFor(device);
+  const projector = konturProjector.supports(device);
   const controls = node('div');
   controls.style.setProperty('--tone',kind.tone);
   const panel = node('section','home-panel detail-panel');
@@ -621,6 +682,7 @@ function renderDevice(device) {
   const gauges = node('div','gauges');
   panel.append(gauges);
   for (const capability of device.capabilities) {
+    if (projector && konturProjectorUi.handled.has(capability.id)) continue;
     if (capability.momentary === true) {
       controls.append(control(device,capability));
       continue;
@@ -639,6 +701,21 @@ function renderDevice(device) {
     if (capability.type === 'slider') controls.append(control(device,capability));
   }
   content.append(heading(t(kind.label),deviceName(device),deviceStatus(device)));
+  if (device.description && !projector) content.append(node('p','sub',t(device.description)));
+  if (projector) content.append(konturProjectorUi.render(device,{
+    node,button,t,formModal,
+    closeDialog:() => dialog.close(),
+    isBusy:() => busyDevices.has(device.id),
+    redraw:() => { if (!dialog.open) render(); },
+    send:async capability => {
+      const current = data.devices.find(item => item.id === device.id);
+      if (!current?.online || busyDevices.has(device.id)) return false;
+      if (!sharedHome.connected()) return transmit(current,capability,true,true);
+      busyDevices.add(device.id);
+      try { return await sharedHome.command(current,capability,true) === true; }
+      finally { busyDevices.delete(device.id); }
+    }
+  }));
   const actions = node('div','row-buttons');
   if (sharedHome.canEdit()) {
     if (data.rooms.length > 1) actions.append(button(t('Переместить прибор'),'ghost',() => moveDevice(device)));
@@ -664,6 +741,11 @@ function renderDevice(device) {
     settings.append(node('h2','',t('Настройки прибора')),controls);
     if (konturAutomation.supportsMode(device,'interval')) settings.append(scheduleControls(device));
     content.append(settings);
+  }
+  if (device.description && projector) {
+    const about = node('details','projector-about');
+    about.append(node('summary','sub',t('О приборе')),node('p','projector-note',t(device.description)));
+    content.append(about);
   }
   const sensors = device.capabilities.filter(item => item.type === 'sensor');
   if (sensors.length) {
@@ -868,7 +950,11 @@ async function transmit(device,capability,value,automatic=false) {
   try {
     const state = await session.send(capability,value);
     applyTelemetry(device,session,state);
-    if (!automatic && deviceSession(device) === session) status(t('Плата подтвердила команду.'));
+    if (!automatic && deviceSession(device) === session) {
+      status(t(device.commandFeedback === 'transmitted'
+        ? 'ESP32 отправила ИК-команду. Состояние проектора не подтверждено.'
+        : 'Плата подтвердила команду.'));
+    }
     return deviceSession(device) === session;
   } catch {
     if (!automatic) status(t('Плата не подтвердила команду.'));
@@ -1110,13 +1196,15 @@ function pairLan(room,item) {
     return;
   }
   const {form,error} = formModal(t('Подключить по Wi-Fi'),t('Подключить'));
-  const token = node('input');
-  token.type = 'password';
-  token.autocomplete = 'off';
-  token.maxLength = 128;
-  token.required = item.requiresToken !== false;
+  const requiresPassword = item.requiresPassword === true;
+  const secret = node('input');
+  secret.type = 'password';
+  secret.autocomplete = 'off';
+  secret.maxLength = requiresPassword ? 63 : 128;
+  if (requiresPassword) secret.minLength = 8;
+  secret.required = requiresPassword || item.requiresToken !== false;
   form.prepend(node('p','sub',item.name));
-  if (token.required) field(form,error,t('Код прибора'),'lan-code',token);
+  if (secret.required) field(form,error,t(requiresPassword ? 'Пароль прибора' : 'Код прибора'),'lan-code',secret);
   const submit = form.querySelector('[type=submit]');
   form.addEventListener('submit',async event => {
     event.preventDefault();
@@ -1124,10 +1212,10 @@ function pairLan(room,item) {
     error.hidden = true;
     try {
       if (sharedHome.connected()) {
-        await sharedHome.pair(room,item,token.value.trim());
+        await sharedHome.pair(room,item,requiresPassword ? secret.value : secret.value.trim());
         return;
       }
-      const session = await konturLan.pair(item.id,token.value.trim());
+      const session = await konturLan.pair(item.id,requiresPassword ? secret.value : secret.value.trim(),requiresPassword);
       if (!dialog.open || !form.isConnected) return;
       const manifest = session.manifest;
       let device = data.devices.find(entry => entry.id === id);
@@ -1138,19 +1226,24 @@ function pairLan(room,item) {
       }
       Object.assign(device,{
         name:manifest.name,kind:Object.prototype.hasOwnProperty.call(kinds,manifest.kind) ? manifest.kind : 'other',
+        description:manifest.description,commandFeedback:manifest.commandFeedback,
         capabilities:manifest.capabilities,state:session.state,online:true
       });
       lanSessions.set(id,session);
+      konturProjectorUi.reset(id);
       measuredAt.set(id,Date.now());
       complete(t('Прибор подключён к комнате «{name}».',{name:roomName(room)}));
       notifyWarnings();
     } catch (failure) {
-      showError(error,sharedHome.connected() ? sharedHome.message(failure) : t(failure.message === 'device-token' ? 'Код прибора не подошёл.' : 'Не удалось подключиться по Wi-Fi.'));
+      const authenticationFailed = ['device-token','device-password'].includes(failure.message);
+      showError(error,authenticationFailed && requiresPassword ? t('Пароль прибора не подошёл.') :
+        sharedHome.connected() ? sharedHome.message(failure) :
+        t(authenticationFailed ? 'Код прибора не подошёл.' : 'Не удалось подключиться по Wi-Fi.'));
     } finally {
       submit.disabled = false;
     }
   });
-  (token.required ? token : submit).focus();
+  (secret.required ? secret : submit).focus();
 }
 let refreshingLan = false;
 async function pollLan() {
@@ -1171,6 +1264,7 @@ async function pollLan() {
         if (lanSessions.get(device.id) !== session) return;
         if (device.online) {
           device.online = false;
+          konturProjectorUi.reset(device.id);
           measuredAt.delete(device.id);
           save();
           if (!dialog.open && byId('schedule-value') !== document.activeElement) render();

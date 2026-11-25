@@ -37,6 +37,7 @@ const sharedHome = (() => {
       'sign-in-required':'Войди снова, чтобы продолжить.',
       'device-offline':'Прибор сейчас не в сети.',
       'device-token':'Код прибора не подошёл.',
+      'device-password':'Пароль прибора не подошёл.',
       'device-owned':'Прибор уже привязан к другому дому. Попроси владельца удалить его.',
       'device-unconfirmed':'Прибор не подтвердил команду.',
       'push-unavailable':'На локальном сервере недоступна отправка push.',
@@ -97,6 +98,7 @@ const sharedHome = (() => {
 
   function leave() {
     if (!home) return;
+    konturProjectorUi.reset();
     home = undefined;
     currentInvite = '';
     if (guestData) {
@@ -121,7 +123,9 @@ const sharedHome = (() => {
   }
 
   function openSnapshot(snapshot) {
+    if (home?.id !== snapshot.id) konturProjectorUi.reset();
     if (!home) {
+      konturProjectorUi.reset();
       guestData = dataCopy();
       lanSessions.clear();
     }
@@ -184,22 +188,24 @@ const sharedHome = (() => {
   }
 
   function queue(route,body,success) {
-    if (!home) return;
+    if (!home) return Promise.resolve(false);
     const id = home.id;
     pending++;
     requestQueue = requestQueue.then(async () => {
-      if (home?.id !== id) return;
+      if (home?.id !== id) return false;
       try {
         const snapshot = await api(route,{...body,homeId:id,revision:home.revision});
-        if (home?.id !== id) return;
+        if (home?.id !== id) return false;
         if (pending === 1) display(snapshot);
         else home = snapshot;
         if (success) status(success);
+        return true;
       } catch (error) {
         status(message(error));
         const snapshot = await api('home/get',{homeId:id}).catch(() => null);
         if (home?.id === id && snapshot) display(snapshot);
         if (home?.id === id && !snapshot && ['home-access-denied','sign-in-required'].includes(error.message)) leave();
+        return false;
       }
     }).finally(() => { pending--; });
     return requestQueue;
@@ -215,7 +221,9 @@ const sharedHome = (() => {
   function command(device, capability, value) {
     status('Отправляем команду…');
     const momentary = device.capabilities.some(item => item.id === capability && item.momentary === true);
-    const result = momentary ? 'Плата подтвердила команду.' : 'Состояние подтверждено.';
+    const result = device.commandFeedback === 'transmitted'
+      ? 'ESP32 отправила ИК-команду. Состояние проектора не подтверждено.'
+      : momentary ? 'Плата подтвердила команду.' : 'Состояние подтверждено.';
     return queue('home/command',{id:device.id,capability,value},t(result));
   }
 
@@ -223,8 +231,10 @@ const sharedHome = (() => {
     return queue('home/schedule',{id:device.id,schedule:device.schedule},t('Расписание сохранено.'));
   }
 
-  async function pair(room, candidate, token) {
-    const snapshot = await api('pair',{homeId:home.id,roomId:room.id,id:candidate.id,token});
+  async function pair(room, candidate, secret) {
+    const credentials = candidate.requiresPassword === true ? {password:secret} : {token:secret};
+    const snapshot = await api('pair',{homeId:home.id,roomId:room.id,id:candidate.id,...credentials});
+    konturProjectorUi.reset('lan-' + candidate.id);
     dialog.close();
     display(snapshot);
     status(t('Прибор подключён к комнате «{name}».',{name:roomName(room)}));

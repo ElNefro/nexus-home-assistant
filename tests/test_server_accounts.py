@@ -2,7 +2,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from server_accounts import AccountError, Accounts
+from server_accounts import AccountError, Accounts, clean_home
+from server_automation import decision
 
 
 def sample():
@@ -116,6 +117,8 @@ class AccountsTest(unittest.TestCase):
         _, current, _ = self.request("/api/home/get",{"homeId":home["id"]},owner)
         settings = current["state"]["devices"][0]
         settings["state"]["power"] = True
+        settings["commandFeedback"] = "transmitted"
+        settings["description"] = "Unconfirmed description"
         del settings["transport"]
         status, saved, _ = self.request("/api/home/save",{
             "homeId":home["id"],"state":current["state"],"revision":current["revision"]
@@ -123,6 +126,8 @@ class AccountsTest(unittest.TestCase):
         self.assertEqual(status,200)
         self.assertEqual(saved["state"]["devices"][0]["transport"],"lan")
         self.assertFalse(saved["state"]["devices"][0]["state"]["power"])
+        self.assertNotIn("commandFeedback", saved["state"]["devices"][0])
+        self.assertNotIn("description", saved["state"]["devices"][0])
         self.accounts.update_device_state(home["id"],device["id"],{"power":True},True)
         self.accounts.mark_lan_offline()
         _, after_reboot, _ = self.request("/api/home/get",{"homeId":home["id"]},owner)
@@ -134,6 +139,77 @@ class AccountsTest(unittest.TestCase):
         },owner)[0],200)
         self.assertFalse(self.accounts.has_device(home["id"],device["id"]))
         self.assertTrue(self.accounts.bind_device(second["id"],manifest,"living",{"power":False})["online"])
+
+    def test_ir_binding_keeps_validated_metadata_and_discards_previous_power_schedule(self):
+        _, owner = self.register("owner@example.test", "Owner")
+        _, home, _ = self.request("/api/home/create", {"name": "Home"}, owner)
+        manifest = {"id": "ir-projector-0123456789ab", "name": "BL-XK01", "kind": "light",
+                    "capabilities": [{"id": "power", "type": "switch", "label": "Power"}]}
+        old = self.accounts.bind_device(home["id"], manifest, "living", {"power": True})
+        self.assertEqual(self.request("/api/home/schedule", {
+            "homeId": home["id"], "id": old["id"], "schedule": {"mode": "interval", "period": 15}
+        }, owner)[0], 200)
+
+        actions = ("toggle", "brightness", "white", "red", "green", "blue", "purple", "rotation")
+        manifest.update(commandFeedback="transmitted", description="ИК-пульт без обратной связи.", capabilities=[
+            {"id": action, "type": "switch", "label": action, "momentary": True,
+             **({"description": "Сначала включите синий и красный свет."} if action == "purple" else {})}
+            for action in actions
+        ])
+        idle = dict.fromkeys(actions, False)
+        device = self.accounts.bind_device(home["id"], manifest, "living", dict.fromkeys(actions, True))
+        self.assertEqual(device["state"], idle)
+        self.assertNotIn("schedule", device)
+        self.assertEqual(device["commandFeedback"], manifest["commandFeedback"])
+        self.assertEqual(device["description"], manifest["description"])
+        self.assertEqual(device["capabilities"], manifest["capabilities"])
+        self.assertEqual(self.request("/api/home/schedule", {
+            "homeId": home["id"], "id": device["id"], "schedule": {"mode": "interval", "period": 15}
+        }, owner)[0], 400)
+
+        self.accounts.update_device_state(home["id"], device["id"], {"purple": True}, True)
+        _, snapshot, _ = self.request("/api/home/get", {"homeId": home["id"]}, owner)
+        proposal = snapshot["state"]["devices"][0]
+        self.assertEqual(proposal["state"], idle)
+        proposal["description"] = "Forged description"
+        proposal.pop("commandFeedback")
+        proposal["capabilities"] = [{"id": "power", "type": "switch", "label": "Forged power"}]
+        proposal["state"] = {"power": True}
+        proposal["schedule"] = {"mode": "interval", "period": 15, "nextRun": 1}
+        status, saved, _ = self.request("/api/home/save", {
+            "homeId": home["id"], "state": snapshot["state"], "revision": snapshot["revision"]
+        }, owner)
+        self.assertEqual(status, 200)
+        confirmed = saved["state"]["devices"][0]
+        self.assertEqual(confirmed["description"], manifest["description"])
+        self.assertEqual(confirmed["commandFeedback"], "transmitted")
+        self.assertEqual(confirmed["capabilities"], manifest["capabilities"])
+        self.assertEqual(confirmed["state"], idle)
+        self.assertNotIn("schedule", confirmed)
+        self.assertEqual(decision({**confirmed, "schedule": proposal["schedule"]}, [], 60_000, None), (None, None))
+        self.assertFalse(self.accounts.apply_automation(home["id"], device["id"], saved["revision"], True, 120_000))
+        self.accounts = Accounts(self.file)
+        _, restarted, _ = self.request("/api/home/get", {"homeId": home["id"]}, owner)
+        self.assertEqual(restarted["state"]["devices"], [confirmed])
+
+    def test_known_device_metadata_requires_valid_values(self):
+        for key, value in (("commandFeedback", "applied"), ("commandFeedback", None),
+                           ("description", None), ("description", "x" * 501),
+                           ("description", "unsafe\x00text"), ("description", "\ud800")):
+            state = sample()
+            state["devices"][0][key] = value
+            with self.subTest(key=key, value=repr(value)), self.assertRaises(AccountError):
+                clean_home(state)
+        for key, value in (("description", None), ("description", "x" * 501),
+                           ("description", "unsafe\x00text"), ("momentary", "true")):
+            state = sample()
+            state["devices"][0]["capabilities"][0][key] = value
+            with self.subTest(capability_key=key, value=repr(value)), self.assertRaises(AccountError):
+                clean_home(state)
+        state = sample()
+        state["devices"][0].update(commandFeedback="transmitted", description="x" * 500)
+        state["devices"][0]["capabilities"][0]["description"] = "x" * 500
+        self.assertEqual(clean_home(state)["devices"][0]["description"], "x" * 500)
 
     def test_home_index_is_case_insensitive_and_survives_restart(self):
         _, owner = self.register("owner@example.test","Owner")
